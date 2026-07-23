@@ -1,0 +1,19 @@
+{
+  "id": "a2a-bridge",
+  "name": "A2A Bridge",
+  "description": "Receives Hermes A2A webhooks and injects into main session",
+  "kind": "plugin",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": { "httpRoutes": [{ "path": "/plugins/a2a-bridge/webhook", "auth": "plugin", "match": "exact" }] },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "secret": { "type": "string", "description": "HMAC-SHA256 shared secret" },
+      "secretEnvVar": { "type": "string", "description": "Env var override", "default": "A2A_BRIDGE_SECRET" },
+      "targetSessionKey": { "type": "string", "description": "Target session key", "default": "agent:main:main" },
+      "targetAgentId": { "type": "string", "description": "Target agent ID", "default": "main" }
+    }
+  }
+}
