@@ -70,13 +70,7 @@ export async function injectIntoSession(
 ${messageText}`;
   await forwardToTelegram(config, tgDisplay);
 
-  // Default: fallback to hooks/wake
-  if (!config.hooksToken) {
-    console.error("a2a-bridge: no hooks token — accepted to inbox but NOT injected");
-    return;
-  }
-
-  // Step 3 (primary): SDK-based injection + autonomous wake
+  // Step 3 (primary): SDK-based injection + autonomous turn
   try {
     await api.session.workflow.enqueueNextTurnInjection({
       sessionKey: targetSessionKey,
@@ -98,7 +92,7 @@ ${messageText}`;
     // Fallback: use hooks/wake for older OpenClaw versions
   }
 
-  // Step 4 (fallback): hooks/wake
+  // Step 4 (fallback): hooks/wake (only reached if SDK wake fails)
   try {
     const resp = await fetch(config.hooksWakeUrl, {
       method: "POST",
