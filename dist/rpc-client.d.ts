@@ -11,7 +11,7 @@
  */
 export interface GatewayRpcClientConfig {
     wsUrl: string;
-    gatewayToken?: string;
+    token?: string;
     password?: string;
     agentResponseTimeoutMs?: number;
 }
@@ -24,7 +24,7 @@ export interface AgentDispatchParams {
 }
 export declare class GatewayRpcClient {
     private wsUrl;
-    private gatewayToken;
+    private token;
     private password;
     private agentResponseTimeoutMs;
     constructor(config: GatewayRpcClientConfig);

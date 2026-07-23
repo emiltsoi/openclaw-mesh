@@ -1,4 +1,7 @@
-export function resolveSecret(api) {
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolveSecret = resolveSecret;
+function resolveSecret(api) {
     // pluginConfig may not include secret (OpenClaw strips sensitive fields)
     const pluginCfg = api.pluginConfig || {};
     if (pluginCfg.secret)

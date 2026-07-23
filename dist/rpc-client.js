@@ -1,3 +1,4 @@
+"use strict";
 /**
  * Lightweight GatewayRpcClient — connection/auth/dispatch only.
  *
@@ -9,11 +10,16 @@
  *
  * Node 22 built-in WebSocket is used (no ws package dependency).
  */
-import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
-import { v4 as uuidv4 } from "uuid";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.GatewayRpcClient = void 0;
+const node_crypto_1 = __importDefault(require("node:crypto"));
+const node_fs_1 = __importDefault(require("node:fs"));
+const node_path_1 = __importDefault(require("node:path"));
+const node_os_1 = __importDefault(require("node:os"));
+const uuid_1 = require("uuid");
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -24,14 +30,15 @@ let _deviceIdentity = null;
 function getOrCreateDeviceIdentity() {
     if (_deviceIdentity)
         return _deviceIdentity;
-    const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
-    const deviceJsonPath = path.join(openclawHome, "identity", "device.json");
+    // Try to load OpenClaw's own device identity (recognised as paired device)
+    const openclawHome = process.env.OPENCLAW_HOME || node_path_1.default.join(node_os_1.default.homedir(), ".openclaw");
+    const deviceJsonPath = node_path_1.default.join(openclawHome, "identity", "device.json");
     try {
-        const raw = fs.readFileSync(deviceJsonPath, "utf-8");
+        const raw = node_fs_1.default.readFileSync(deviceJsonPath, "utf-8");
         const json = JSON.parse(raw);
         if (json.deviceId && json.publicKeyPem && json.privateKeyPem) {
-            const privateKey = crypto.createPrivateKey(json.privateKeyPem);
-            const publicKey = crypto.createPublicKey(json.publicKeyPem);
+            const privateKey = node_crypto_1.default.createPrivateKey(json.privateKeyPem);
+            const publicKey = node_crypto_1.default.createPublicKey(json.publicKeyPem);
             const publicKeyRaw = publicKey.export({ type: "spki", format: "der" });
             const rawBytes = publicKeyRaw.subarray(12);
             const publicKeyB64Url = rawBytes.toString("base64url");
@@ -42,37 +49,41 @@ function getOrCreateDeviceIdentity() {
     catch {
         // Fall through to ephemeral key generation
     }
-    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+    const { publicKey, privateKey } = node_crypto_1.default.generateKeyPairSync("ed25519");
     const publicKeyRaw = publicKey.export({ type: "spki", format: "der" });
     const rawBytes = publicKeyRaw.subarray(12);
     const publicKeyB64Url = rawBytes.toString("base64url");
-    const deviceId = crypto.createHash("sha256").update(rawBytes).digest("hex");
+    const deviceId = node_crypto_1.default.createHash("sha256").update(rawBytes).digest("hex");
     _deviceIdentity = { publicKey: publicKeyB64Url, privateKey, deviceId };
     return _deviceIdentity;
 }
 // ---------------------------------------------------------------------------
 // GatewayRpcClient
 // ---------------------------------------------------------------------------
-export class GatewayRpcClient {
+class GatewayRpcClient {
     wsUrl;
-    gatewayToken;
+    token;
     password;
     agentResponseTimeoutMs;
     constructor(config) {
         if (!config.wsUrl)
             throw new Error("GatewayRpcClient: wsUrl is required");
         this.wsUrl = config.wsUrl;
-        this.gatewayToken = config.gatewayToken ?? "";
+        this.token = config.token ?? "";
         this.password = config.password ?? "";
         this.agentResponseTimeoutMs = config.agentResponseTimeoutMs ?? 300_000;
     }
+    // -----------------------------------------------------------------------
+    // dispatchAgentMessage — fire-and-forget: connect, send, close
+    // -----------------------------------------------------------------------
     async dispatchAgentMessage(sessionKey, message) {
-        const idempotencyKey = "a2a-" + crypto.randomUUID();
+        const idempotencyKey = (0, uuid_1.v4)();
         await this.dispatch("main", sessionKey, message, idempotencyKey);
     }
     async dispatch(agentId, sessionKey, message, idempotencyKey, deliver = false) {
         const { socket, challengeNonce } = await this.openConnect();
         try {
+            // Send the `agent` RPC
             const params = {
                 agentId,
                 sessionKey,
@@ -83,19 +94,24 @@ export class GatewayRpcClient {
             await this.request(socket, "agent", params, this.agentResponseTimeoutMs);
         }
         catch (err) {
+            // Throw with original context
             const msg = err instanceof Error ? err.message : String(err);
-            throw new Error("Gateway dispatch failed: " + msg);
+            throw new Error(`Gateway dispatch failed: ${msg}`);
         }
         finally {
             this.closeSocket(socket);
         }
     }
+    // -----------------------------------------------------------------------
+    // Low-level: open + authenticate
+    // -----------------------------------------------------------------------
     async openConnect() {
         const ctor = globalThis.WebSocket;
         if (!ctor) {
             throw new Error("GatewayRpcClient: WebSocket runtime unavailable (Node 22+ required)");
         }
         const socket = new ctor(this.wsUrl);
+        // Wait for the WebSocket to open
         await new Promise((resolve, reject) => {
             let settled = false;
             const cleanup = () => {
@@ -123,6 +139,7 @@ export class GatewayRpcClient {
             socket.addEventListener("error", onError);
             socket.addEventListener("close", onClose);
         });
+        // Await the connect.challenge event (nonce)
         let challengeNonce = "";
         await new Promise((resolve, reject) => {
             let settled = false;
@@ -147,7 +164,7 @@ export class GatewayRpcClient {
                         }
                     }
                 }
-                catch { /* skip */ }
+                catch { /* skip unparseable frames */ }
             };
             const onClose = () => { if (!settled) {
                 settled = true;
@@ -156,19 +173,23 @@ export class GatewayRpcClient {
             socket.addEventListener("message", onMessage);
             socket.addEventListener("close", onClose);
         });
+        // Send the `connect` RPC
         await this.request(socket, "connect", this.buildConnectParams(challengeNonce), CONNECT_TIMEOUT_MS);
         return { socket, challengeNonce };
     }
+    // -----------------------------------------------------------------------
+    // RPC request helper
+    // -----------------------------------------------------------------------
     request(socket, method, params, timeoutMs) {
-        const id = uuidv4();
+        const id = (0, uuid_1.v4)();
         const frame = { type: "req", id, method, params };
         const payload = JSON.stringify(frame);
         if (socket.readyState !== WebSocket.OPEN) {
-            return Promise.reject(new Error("Gateway WebSocket not open (readyState=" + socket.readyState + ")"));
+            return Promise.reject(new Error(`Gateway WebSocket not open (readyState=${socket.readyState})`));
         }
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
-                reject(new Error("Gateway request timed out: " + method));
+                reject(new Error(`Gateway request timed out: ${method}`));
             }, timeoutMs);
             const onMessage = (event) => {
                 const raw = typeof event.data === "string" ? event.data : "";
@@ -184,12 +205,12 @@ export class GatewayRpcClient {
                             resolve(res.payload);
                         }
                         else {
-                            const errMsg = res?.error?.message || ("Gateway method failed: " + method);
+                            const errMsg = res?.error?.message || `Gateway method failed: ${method}`;
                             reject(new Error(errMsg));
                         }
                     }
                 }
-                catch { /* skip */ }
+                catch { /* skip unparseable frames */ }
             };
             const onClose = () => {
                 socket.removeEventListener("message", onMessage);
@@ -209,10 +230,13 @@ export class GatewayRpcClient {
             }
         });
     }
+    // -----------------------------------------------------------------------
+    // Build connect params (device identity + auth)
+    // -----------------------------------------------------------------------
     buildConnectParams(nonce) {
         const auth = {};
-        if (this.gatewayToken)
-            auth.token = this.gatewayToken;
+        if (this.token)
+            auth.token = this.token;
         if (this.password)
             auth.password = this.password;
         const role = "operator";
@@ -231,7 +255,7 @@ export class GatewayRpcClient {
                 version: "a2a-bridge",
                 platform: process.platform,
                 mode: "cli",
-                instanceId: uuidv4(),
+                instanceId: (0, uuid_1.v4)(),
             },
             role,
             scopes,
@@ -239,6 +263,7 @@ export class GatewayRpcClient {
         if (Object.keys(auth).length > 0) {
             params.auth = auth;
         }
+        // Device identity with signed nonce
         if (nonce) {
             const identity = getOrCreateDeviceIdentity();
             const signedAtMs = Date.now();
@@ -250,13 +275,13 @@ export class GatewayRpcClient {
                 role,
                 scopes.join(","),
                 String(signedAtMs),
-                this.gatewayToken || "",
+                this.token || "",
                 nonce,
                 process.platform,
                 "",
             ];
             const payload = payloadParts.join("|");
-            const signature = crypto.sign(null, Buffer.from(payload), identity.privateKey);
+            const signature = node_crypto_1.default.sign(null, Buffer.from(payload), identity.privateKey);
             const signatureB64Url = signature.toString("base64url");
             params.device = {
                 id: identity.deviceId,
@@ -268,9 +293,13 @@ export class GatewayRpcClient {
         }
         return params;
     }
+    // -----------------------------------------------------------------------
+    // Cleanup
+    // -----------------------------------------------------------------------
     closeSocket(socket) {
         if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
             socket.close();
         }
     }
 }
+exports.GatewayRpcClient = GatewayRpcClient;

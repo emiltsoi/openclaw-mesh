@@ -1,7 +1,6 @@
 {
   "name": "@openclaw/a2a-bridge",
   "version": "0.1.0",
-  "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
@@ -19,7 +18,8 @@
   "devDependencies": {
     "@types/uuid": "^10.0.0",
     "openclaw": "*",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "@types/node": "*"
   },
   "dependencies": {
     "uuid": "^14.0.1"

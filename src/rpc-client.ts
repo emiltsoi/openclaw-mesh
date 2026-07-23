@@ -14,7 +14,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { v4 as uuidv4 } from "uuid";
+// uuidv4 replaced with native crypto.randomUUID()
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -204,7 +204,7 @@ export class GatewayRpcClient {
     params: Record<string, unknown>,
     timeoutMs: number,
   ): Promise<T> {
-    const id = uuidv4();
+    const id = crypto.randomUUID();
     const frame = { type: "req", id, method, params };
     const payload = JSON.stringify(frame);
     if (socket.readyState !== WebSocket.OPEN) {
@@ -272,7 +272,7 @@ export class GatewayRpcClient {
         version: "a2a-bridge",
         platform: process.platform,
         mode: "cli",
-        instanceId: uuidv4(),
+        instanceId: crypto.randomUUID(),
       },
       role,
       scopes,

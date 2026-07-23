@@ -1,4 +1,8 @@
-export function parseA2AEnvelope(text) {
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.parseA2AEnvelope = parseA2AEnvelope;
+exports.stripEnvelope = stripEnvelope;
+function parseA2AEnvelope(text) {
     if (!text.startsWith("[a2a]"))
         return null;
     const defaults = { from: "unknown", to: "emts", id: "unknown", action: "info", reply: "no" };
@@ -29,7 +33,7 @@ export function parseA2AEnvelope(text) {
     }
     return defaults;
 }
-export function stripEnvelope(text) {
+function stripEnvelope(text) {
     const lastBracket = text.lastIndexOf("]");
     if (lastBracket === -1)
         return text;

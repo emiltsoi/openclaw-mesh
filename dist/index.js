@@ -1,24 +1,28 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-targets";
-import { resolveSecret } from "./config.js";
-import { parseA2AEnvelope, stripEnvelope } from "./envelope.js";
-import { injectIntoSession, cachedBotToken, cachedChatId } from "./injector.js";
-import { a2aSend } from "./outbound.js";
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const node_crypto_1 = __importDefault(require("node:crypto"));
+const node_fs_1 = __importDefault(require("node:fs"));
+const plugin_entry_1 = require("openclaw/plugin-sdk/plugin-entry");
+const webhook_targets_1 = require("openclaw/plugin-sdk/webhook-targets");
+const config_js_1 = require("./config.js");
+const envelope_js_1 = require("./envelope.js");
+const injector_js_1 = require("./injector.js");
 const DEBUG_LOG = "/tmp/a2a-debug.log";
 function debugLog(msg) {
     const timestamp = new Date().toISOString();
     const line = `[${timestamp}] ${msg}\n`;
     console.error(line);
     try {
-        fs.appendFileSync(DEBUG_LOG, line);
+        node_fs_1.default.appendFileSync(DEBUG_LOG, line);
     }
     catch (e) {
         // ignore fs errors
     }
 }
-const plugin = definePluginEntry({
+const plugin = (0, plugin_entry_1.definePluginEntry)({
     id: "a2a-bridge",
     name: "A2A Bridge",
     description: "Receives Hermes A2A webhooks, verifies HMAC, injects into main session",
@@ -44,7 +48,7 @@ const plugin = definePluginEntry({
             debugLog(`registry BEFORE dump failed: ${e.message}`);
         }
         debugLog("calling registerPluginHttpRoute with path = /plugins/a2a-bridge/webhook");
-        registerPluginHttpRoute({
+        (0, webhook_targets_1.registerPluginHttpRoute)({
             path: "/plugins/a2a-bridge/webhook",
             auth: "plugin",
             match: "exact",
@@ -59,17 +63,17 @@ const plugin = definePluginEntry({
                 const body = Buffer.concat(chunks);
                 try {
                     const sigHeader = req.headers["x-hub-signature-256"] || "";
-                    const secret = resolveSecret(api);
+                    const secret = (0, config_js_1.resolveSecret)(api);
                     if (!sigHeader) {
                         res.statusCode = 403;
                         res.end(JSON.stringify({ status: "forbidden" }));
                         return true;
                     }
                     const expected = sigHeader.startsWith("sha256=") ? sigHeader.slice(7) : sigHeader;
-                    const computed = crypto.createHmac("sha256", secret).update(body).digest("hex");
+                    const computed = node_crypto_1.default.createHmac("sha256", secret).update(body).digest("hex");
                     const computedBuf = Buffer.from(computed);
                     const expectedBuf = Buffer.from(expected);
-                    if (computedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(computedBuf, expectedBuf)) {
+                    if (computedBuf.length !== expectedBuf.length || !node_crypto_1.default.timingSafeEqual(computedBuf, expectedBuf)) {
                         res.statusCode = 403;
                         res.end(JSON.stringify({ status: "forbidden" }));
                         return true;
@@ -84,7 +88,7 @@ const plugin = definePluginEntry({
                         return true;
                     }
                     const text = typeof payload.text === "string" ? payload.text : "";
-                    const envelope = parseA2AEnvelope(text);
+                    const envelope = (0, envelope_js_1.parseA2AEnvelope)(text);
                     if (!envelope) {
                         res.statusCode = 200;
                         res.end(JSON.stringify({ status: "ok", note: "ignored-non-envelope" }));
@@ -95,8 +99,8 @@ const plugin = definePluginEntry({
                         res.end(JSON.stringify({ status: "ok", note: "not-addressed-to-me" }));
                         return true;
                     }
-                    const messageText = stripEnvelope(text);
-                    await injectIntoSession(api, messageText, envelope);
+                    const messageText = (0, envelope_js_1.stripEnvelope)(text);
+                    await (0, injector_js_1.injectIntoSession)(api, messageText, envelope);
                     res.statusCode = 200;
                     res.end(JSON.stringify({ status: "ok" }));
                     return true;
@@ -121,31 +125,6 @@ const plugin = definePluginEntry({
         catch (e) {
             debugLog(`registry AFTER dump failed: ${e.message}`);
         }
-        // Register a2a_send tool for outbound mesh messages
-        api.registerTool({
-            name: "a2a_send",
-            description: "Send an A2A message to a Hermes mesh peer via HMAC-signed webhook",
-            parameters: {
-                type: "object",
-                properties: {
-                    target: { type: "string", description: "Target agent name (e.g., 'agent0', 'linda')" },
-                    message: { type: "string", description: "Message text to send" },
-                    action: { type: "string", enum: ["do", "info"], description: "Action type", default: "do" },
-                    replyExpected: { type: "boolean", description: "Whether a reply is expected", default: true },
-                },
-                required: ["target", "message"],
-            },
-            execute: async (call) => {
-                const id = await a2aSend(api, {
-                    target: call.target,
-                    message: call.message,
-                    action: call.action || "do",
-                    replyExpected: call.replyExpected !== false,
-                });
-                return { type: "text", text: `A2A message sent to ${call.target} (id: ${id})` };
-            },
-        });
-        debugLog("a2a_send tool registered");
         // Register agent_end hook to forward outbound A2A replies to Telegram
         api.on("agent_end", async (event) => {
             debugLog("agent_end: hook fired");
@@ -170,12 +149,12 @@ const plugin = definePluginEntry({
                 return;
             }
             // Forward to Telegram (try cached from injector, fallback to config)
-            let tgToken = cachedBotToken;
+            let tgToken = injector_js_1.cachedBotToken;
             if (!tgToken) {
                 const tgCfg = (api.config?.channels?.telegram || {});
                 tgToken = tgCfg.botToken || "";
             }
-            const chatId = cachedChatId;
+            const chatId = injector_js_1.cachedChatId;
             debugLog(`agent_end: tgToken present=${!!tgToken}, chatId=${chatId}`);
             if (!tgToken) {
                 debugLog(`agent_end: no tgToken, skipping forward`);
@@ -200,4 +179,4 @@ const plugin = definePluginEntry({
         });
     },
 });
-export default plugin;
+exports.default = plugin;
