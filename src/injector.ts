@@ -14,6 +14,7 @@ function resolveConfig(api: any) {
   const telegram = cfg.channels?.telegram || {};
   const port = gateway.port || 18860;
   cachedBotToken = telegram.botToken || "";
+  cachedChatId = telegram.chatId || "7945905361";
   return {
     port,
     hooksWakeUrl: `http://localhost:${port}/hooks/wake`,
@@ -49,20 +50,18 @@ export async function injectIntoSession(
   const sanitize = (s: string) => s.replace(/[\[\]]/g, "");
   const text = `[a2a][from:${sanitize(envelope.from)}][to:${sanitize(envelope.to)}][id:${sanitize(envelope.id)}][action:${sanitize(envelope.action)}][reply:${sanitize(envelope.reply)}] ${messageText}`;
   const config = resolveConfig(api);
+  const pluginCfg = api.pluginConfig || {};
+  const targetSessionKey = pluginCfg.targetSessionKey || "agent:main:main";
+  const idempotencyKey = `a2a:${envelope.id}`;
 
-  // Step 0: Can fs even write?
+  // Step 1: Write to inbox for durability (belt-and-suspenders)
+  const inboxDir = pluginCfg.inboxPath || DEFAULT_INBOX;
   try {
-    fs.writeFileSync("/tmp/a2a-fs-test.txt", "works");
-    console.error("a2a-bridge: fs.write OK");
+    const inbox = inboxDir;
+    fs.appendFileSync(inbox, JSON.stringify({ ts: Date.now(), text, sessionKey: targetSessionKey }) + "\n");
+    console.error("a2a-bridge: inbox written");
   } catch (e: any) {
-    console.error("a2a-bridge: fs.write FAILED:", e.message || e);
-  }
-
-  // Step 1: Write to inbox for durability
-  try {
-    fs.appendFileSync(DEFAULT_INBOX, JSON.stringify({ ts: Date.now(), text, sessionKey: "agent:main:main" }) + "\n");
-  } catch (e) {
-    // silent
+    console.error("a2a-bridge: inbox write failed:", e.message || e);
   }
 
   // Step 2: Forward incoming A2A to Emil on Telegram (mechanical, before wake)
@@ -71,12 +70,35 @@ export async function injectIntoSession(
 ${messageText}`;
   await forwardToTelegram(config, tgDisplay);
 
-  // Step 3: Wake the session via hooks/wake
+  // Default: fallback to hooks/wake
   if (!config.hooksToken) {
     console.error("a2a-bridge: no hooks token — accepted to inbox but NOT injected");
     return;
   }
 
+  // Step 3 (primary): SDK-based injection + autonomous wake
+  try {
+    await api.session.workflow.enqueueNextTurnInjection({
+      sessionKey: targetSessionKey,
+      idempotencyKey,
+      content: text,
+      ttlMs: 10 * 60_000,
+    });
+    console.error("a2a-bridge: injection enqueued");
+
+    await api.runtime.agent.runEmbeddedAgent({
+      sessionId: targetSessionKey,
+      prompt: "",
+      timeoutMs: 600_000,
+    });
+    console.error("a2a-bridge: embedded agent run queued");
+    return;
+  } catch (e: any) {
+    console.error("a2a-bridge: SDK wake failed, falling back to hooks/wake:", e.message || e);
+    // Fallback: use hooks/wake for older OpenClaw versions
+  }
+
+  // Step 4 (fallback): hooks/wake
   try {
     const resp = await fetch(config.hooksWakeUrl, {
       method: "POST",
@@ -87,8 +109,8 @@ ${messageText}`;
       body: JSON.stringify({ text, mode: "now" }),
       signal: AbortSignal.timeout(5_000),
     });
-    console.error("a2a-bridge: hooks/wake HTTP", resp.status);
-  } catch (e) {
-    console.error("a2a-bridge: hooks/wake failed:", e);
+    console.error("a2a-bridge: hooks/wake (fallback) HTTP", resp.status);
+  } catch (e: any) {
+    console.error("a2a-bridge: hooks/wake (fallback) failed:", e.message || e);
   }
 }

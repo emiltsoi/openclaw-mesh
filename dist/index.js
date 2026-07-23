@@ -5,6 +5,7 @@ import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-targets";
 import { resolveSecret } from "./config.js";
 import { parseA2AEnvelope, stripEnvelope } from "./envelope.js";
 import { injectIntoSession, cachedBotToken, cachedChatId } from "./injector.js";
+import { a2aSend } from "./outbound.js";
 const DEBUG_LOG = "/tmp/a2a-debug.log";
 function debugLog(msg) {
     const timestamp = new Date().toISOString();
@@ -120,6 +121,31 @@ const plugin = definePluginEntry({
         catch (e) {
             debugLog(`registry AFTER dump failed: ${e.message}`);
         }
+        // Register a2a_send tool for outbound mesh messages
+        api.registerTool({
+            name: "a2a_send",
+            description: "Send an A2A message to a Hermes mesh peer via HMAC-signed webhook",
+            parameters: {
+                type: "object",
+                properties: {
+                    target: { type: "string", description: "Target agent name (e.g., 'agent0', 'linda')" },
+                    message: { type: "string", description: "Message text to send" },
+                    action: { type: "string", enum: ["do", "info"], description: "Action type", default: "do" },
+                    replyExpected: { type: "boolean", description: "Whether a reply is expected", default: true },
+                },
+                required: ["target", "message"],
+            },
+            execute: async (call) => {
+                const id = await a2aSend(api, {
+                    target: call.target,
+                    message: call.message,
+                    action: call.action || "do",
+                    replyExpected: call.replyExpected !== false,
+                });
+                return { type: "text", text: `A2A message sent to ${call.target} (id: ${id})` };
+            },
+        });
+        debugLog("a2a_send tool registered");
         // Register agent_end hook to forward outbound A2A replies to Telegram
         api.on("agent_end", async (event) => {
             debugLog("agent_end: hook fired");
