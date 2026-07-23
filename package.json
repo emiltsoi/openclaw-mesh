@@ -2,14 +2,26 @@
   "name": "@openclaw/a2a-bridge",
   "version": "0.1.0",
   "type": "module",
-  "exports": { ".": "./dist/index.js" },
-  "openclaw": {
-    "extensions": ["./src/index.ts"],
-    "runtimeExtensions": ["./dist/index.js"]
+  "exports": {
+    ".": "./dist/index.js"
   },
-  "scripts": { "build": "tsc" },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc"
+  },
   "devDependencies": {
-    "typescript": "^5.0.0",
-    "openclaw": "*"
+    "@types/uuid": "^10.0.0",
+    "openclaw": "*",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "uuid": "^14.0.1"
   }
 }

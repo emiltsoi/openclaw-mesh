@@ -1,4 +1,9 @@
+/**
+ * injectIntoSession — inject A2A inbound messages into the OpenClaw agent session
+ * via the Gateway RPC client (replacing the broken SDK + hooks/wake approach).
+ */
 import fs from "node:fs";
+import { GatewayRpcClient } from "./rpc-client.js";
 const DEFAULT_INBOX = "/tmp/openclaw-mesh/a2a-inbox.jsonl";
 // Module-level cache for Telegram credentials (accessible from hooks)
 export let cachedBotToken = "";
@@ -13,8 +18,9 @@ function resolveConfig(api) {
     cachedChatId = telegram.chatId || "7945905361";
     return {
         port,
-        hooksWakeUrl: `http://localhost:${port}/hooks/wake`,
-        hooksToken: hooks.token || "",
+        wsUrl: "ws://localhost:" + port,
+        gatewayToken: gateway.auth?.token || hooks.token || "",
+        gatewayPassword: gateway.auth?.password || "",
         telegramBotToken: cachedBotToken,
         telegramChatId: cachedChatId,
     };
@@ -23,7 +29,7 @@ async function forwardToTelegram(config, text) {
     if (!config.telegramBotToken)
         return;
     try {
-        const resp = await fetch(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
+        const resp = await fetch("https://api.telegram.org/bot" + config.telegramBotToken + "/sendMessage", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ chat_id: config.telegramChatId, text, disable_web_page_preview: true }),
@@ -37,11 +43,10 @@ async function forwardToTelegram(config, text) {
 }
 export async function injectIntoSession(api, messageText, envelope) {
     const sanitize = (s) => s.replace(/[\[\]]/g, "");
-    const text = `[a2a][from:${sanitize(envelope.from)}][to:${sanitize(envelope.to)}][id:${sanitize(envelope.id)}][action:${sanitize(envelope.action)}][reply:${sanitize(envelope.reply)}] ${messageText}`;
+    const text = "[a2a][from:" + sanitize(envelope.from) + "][to:" + sanitize(envelope.to) + "][id:" + sanitize(envelope.id) + "][action:" + sanitize(envelope.action) + "][reply:" + sanitize(envelope.reply) + "] " + messageText;
     const config = resolveConfig(api);
     const pluginCfg = api.pluginConfig || {};
     const targetSessionKey = pluginCfg.targetSessionKey || "agent:main:main";
-    const idempotencyKey = `a2a:${envelope.id}`;
     // Step 1: Write to inbox for durability (belt-and-suspenders)
     const inboxDir = pluginCfg.inboxPath || DEFAULT_INBOX;
     try {
@@ -53,37 +58,32 @@ export async function injectIntoSession(api, messageText, envelope) {
         console.error("a2a-bridge: inbox write failed:", e.message || e);
     }
     // Step 2: Forward incoming A2A to Emil on Telegram (mechanical, before wake)
-    const tgDisplay = `📥 [A2A from ${envelope.from}]
-
-${messageText}`;
+    const tgDisplay = "\u{1F4E5} [A2A from " + envelope.from + "]\n\n" + messageText;
     await forwardToTelegram(config, tgDisplay);
-    // Step 3 (primary): SDK-based injection + autonomous turn
+    // Step 3 (primary): Gateway RPC dispatch — connect, authenticate, send agent message, close
     try {
-        await api.session.workflow.enqueueNextTurnInjection({
-            sessionKey: targetSessionKey,
-            idempotencyKey,
-            content: text,
-            ttlMs: 10 * 60_000,
+        const client = new GatewayRpcClient({
+            wsUrl: config.wsUrl,
+            gatewayToken: config.gatewayToken,
+            password: config.gatewayPassword,
+            agentResponseTimeoutMs: 300_000,
         });
-        console.error("a2a-bridge: injection enqueued");
-        await api.runtime.agent.runEmbeddedAgent({
-            sessionId: targetSessionKey,
-            prompt: "",
-            timeoutMs: 600_000,
-        });
-        console.error("a2a-bridge: embedded agent run queued");
+        console.error("a2a-bridge: dispatching via Gateway RPC to session " + targetSessionKey);
+        await client.dispatchAgentMessage(targetSessionKey, text);
+        console.error("a2a-bridge: Gateway RPC dispatch succeeded");
         return;
     }
     catch (e) {
-        console.error("a2a-bridge: SDK wake failed, falling back to hooks/wake:", e.message || e);
-        // Fallback: use hooks/wake for older OpenClaw versions
+        console.error("a2a-bridge: Gateway RPC dispatch failed:", e.message || e);
     }
-    // Step 4 (fallback): hooks/wake (only reached if SDK wake fails)
+    // Step 4 (fallback): hooks/wake (only reached if Gateway RPC fails)
     try {
-        const resp = await fetch(config.hooksWakeUrl, {
+        const fallbackUrl = "http://localhost:" + config.port + "/hooks/wake";
+        console.error("a2a-bridge: trying hooks/wake fallback at " + fallbackUrl);
+        const resp = await fetch(fallbackUrl, {
             method: "POST",
             headers: {
-                authorization: `Bearer ${config.hooksToken}`,
+                authorization: "Bearer " + config.gatewayToken,
                 "content-type": "application/json",
             },
             body: JSON.stringify({ text, mode: "now" }),
