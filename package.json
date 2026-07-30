@@ -1,0 +1,48 @@
+{
+  "name": "@emiltsoi/openclaw-mesh",
+  "version": "0.1.1",
+  "author": "emiltsoi",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "test:unit": "npm run test -- --test-name-pattern=unit",
+    "clawhub-publish": "node scripts/clawhub-publish.js"
+  },
+  "dependencies": {
+    "js-yaml": "^5.2.2"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.6.11"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "*",
+    "openclaw": "*",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "openclaw": {
+    "extensions": ["./dist/index.js"],
+    "compat": {
+      "pluginApi": ">=2026.6.11",
+      "minGatewayVersion": ">=2026.6.11"
+    },
+    "build": {
+      "openclawVersion": "2026.6.11",
+      "pluginSdkVersion": "2026.6.11"
+    }
+  }
+}
