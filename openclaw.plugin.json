@@ -1,0 +1,128 @@
+{
+  "id": "openclaw-mesh",
+  "name": "OpenClaw Mesh",
+  "description": "Stateful, signed agent-to-agent mesh messaging for OpenClaw; also bridges to Hermes mesh peers",
+  "kind": "plugin",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "httpRoutes": [
+      {
+        "path": "/plugins/openclaw-mesh/webhook",
+        "auth": "plugin",
+        "match": "exact"
+      }
+    ],
+    "tools": [
+      "mesh_list",
+      "mesh_send",
+      "mesh_register",
+      "mesh_deregister"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "routingAgent": {
+        "type": "string",
+        "description": "mesh agent name this bridge accepts messages for",
+        "default": "emts"
+      },
+      "secret": {
+        "type": "string",
+        "description": "HMAC-SHA256 shared secret"
+      },
+      "secretEnvVar": {
+        "type": "string",
+        "description": "Env var override",
+        "default": "OPENCLAW_MESH_SECRET"
+      },
+      "targetSessionKey": {
+        "type": "string",
+        "description": "Target session key",
+        "default": "agent:main:main"
+      },
+      "targetAgentId": {
+        "type": "string",
+        "description": "Target agent ID",
+        "default": "main"
+      },
+      "sourceChannel": {
+        "type": "string",
+        "description": "Channel to attribute the injected turn to (e.g. telegram, mesh). Use mesh for direct routing to the configured session.",
+        "default": "mesh"
+      },
+      "sourceTo": {
+        "type": "string",
+        "description": "Channel target/to (e.g. Telegram chat id) for the injected turn"
+      },
+      "model": {
+        "type": "string",
+        "description": "Optional explicit provider/model override for the embedded agent run (e.g. deepseek/deepseek-v4-pro)"
+      },
+      "inboxPath": {
+        "type": "string",
+        "description": "Path to the durable inbox file",
+        "default": "/tmp/openclaw-mesh/mesh-inbox.jsonl"
+      },
+      "mirrorInbound": {
+        "type": "string",
+        "enum": ["none", "telegram", "cli"],
+        "description": "Where to mirror inbound mesh messages. 'none' disables mirroring, 'telegram' sends via the configured Telegram bot, 'cli' logs to stdout.",
+        "default": "none"
+      },
+      "mirrorOutbound": {
+        "type": "string",
+        "enum": ["none", "telegram", "cli"],
+        "description": "Where to mirror outbound mesh messages. 'none' disables mirroring, 'telegram' sends via the configured Telegram bot, 'cli' logs to stdout.",
+        "default": "none"
+      },
+      "meshVaultPath": {
+        "type": "string",
+        "description": "Path to the mesh vault root (directory that contains mesh/agents/<agent>/identity.yaml)",
+        "default": ""
+      },
+      "debug": {
+        "type": "boolean",
+        "description": "Emit verbose debug logs to stderr and /tmp/openclaw-mesh-debug.log",
+        "default": false
+      },
+      "allowLoopback": {
+        "type": "boolean",
+        "description": "Allow outbound webhook deliveries to loopback/private addresses",
+        "default": false
+      },
+      "deliveryRetries": {
+        "type": "integer",
+        "description": "Number of outbound webhook delivery attempts",
+        "default": 3
+      },
+      "deliveryBackoffMs": {
+        "type": "integer",
+        "description": "Initial retry backoff in milliseconds",
+        "default": 1000
+      },
+      "deliveryTimeoutMs": {
+        "type": "integer",
+        "description": "Per-attempt delivery timeout in milliseconds",
+        "default": 15000
+      },
+      "identitySource": {
+        "type": "string",
+        "enum": ["file", "registry"],
+        "description": "Identity backend: 'file' (default, local mesh vault) or 'registry' (mesh-peer-registry)",
+        "default": "file"
+      },
+      "registryUrl": {
+        "type": "string",
+        "description": "URL of the mesh-peer-registry server (required when identitySource is 'registry')"
+      },
+      "privateKeyPath": {
+        "type": "string",
+        "description": "Path to the local Ed25519 private key PEM (used when identitySource is 'registry')",
+        "default": "~/.mesh/keys/<agent>.pem"
+      }
+    }
+  }
+}
