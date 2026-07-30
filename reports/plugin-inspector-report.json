@@ -1,0 +1,430 @@
+{
+  "generatedAt": "deterministic",
+  "targetOpenClaw": {
+    "configuredPath": null,
+    "status": "disabled",
+    "compatRecords": [],
+    "compatRecordStatuses": {},
+    "hookNames": [],
+    "apiRegistrars": [],
+    "capturedRegistrars": [],
+    "sdkExports": [],
+    "reservedSdkExports": [],
+    "supportedFacadeSdkExports": [],
+    "publicPluginOwnedSdkExports": [],
+    "manifestFields": [],
+    "manifestContractFields": []
+  },
+  "status": "pass",
+  "summary": {
+    "breakageCount": 0,
+    "warningCount": 0,
+    "deprecationWarningCount": 0,
+    "issueCount": 0
+  },
+  "fixtures": [
+    {
+      "id": "openclaw-mesh",
+      "name": "OpenClaw Mesh",
+      "priority": "high",
+      "seams": [
+        "dynamic-tool"
+      ],
+      "why": "local OpenClaw plugin root",
+      "status": "ok",
+      "hooks": [
+        "agent_end"
+      ],
+      "hookDetails": [
+        {
+          "name": "agent_end",
+          "file": "dist-test/src/index.js",
+          "line": 176,
+          "ref": "dist-test/src/index.js:176"
+        },
+        {
+          "name": "agent_end",
+          "file": "dist/index.js",
+          "line": 176,
+          "ref": "dist/index.js:176"
+        },
+        {
+          "name": "agent_end",
+          "file": "src/index.ts",
+          "line": 197,
+          "ref": "src/index.ts:197"
+        }
+      ],
+      "registrations": [
+        "definePluginEntry",
+        "registerTool"
+      ],
+      "registrationDetails": [
+        {
+          "name": "definePluginEntry",
+          "file": "dist-test/src/index.js",
+          "line": 32,
+          "ref": "dist-test/src/index.js:32"
+        },
+        {
+          "name": "definePluginEntry",
+          "file": "dist/index.js",
+          "line": 32,
+          "ref": "dist/index.js:32"
+        },
+        {
+          "name": "definePluginEntry",
+          "file": "src/index.ts",
+          "line": 42,
+          "ref": "src/index.ts:42"
+        },
+        {
+          "name": "registerTool",
+          "file": "dist-test/src/discovery.js",
+          "line": 371,
+          "ref": "dist-test/src/discovery.js:371"
+        },
+        {
+          "name": "registerTool",
+          "file": "dist-test/src/discovery.js",
+          "line": 404,
+          "ref": "dist-test/src/discovery.js:404"
+        },
+        {
+          "name": "registerTool",
+          "file": "dist-test/src/discovery.js",
+          "line": 491,
+          "ref": "dist-test/src/discovery.js:491"
+        },
+        {
+          "name": "registerTool",
+          "file": "dist-test/src/discovery.js",
+          "line": 580,
+          "ref": "dist-test/src/discovery.js:580"
+        },
+        {
+          "name": "registerTool",
+          "file": "dist/discovery.js",
+          "line": 371,
+          "ref": "dist/discovery.js:371"
+        },
+        {
+          "name": "registerTool",
+          "file": "dist/discovery.js",
+          "line": 404,
+          "ref": "dist/discovery.js:404"
+        },
+        {
+          "name": "registerTool",
+          "file": "dist/discovery.js",
+          "line": 491,
+          "ref": "dist/discovery.js:491"
+        },
+        {
+          "name": "registerTool",
+          "file": "dist/discovery.js",
+          "line": 580,
+          "ref": "dist/discovery.js:580"
+        },
+        {
+          "name": "registerTool",
+          "file": "src/discovery.ts",
+          "line": 459,
+          "ref": "src/discovery.ts:459"
+        },
+        {
+          "name": "registerTool",
+          "file": "src/discovery.ts",
+          "line": 494,
+          "ref": "src/discovery.ts:494"
+        },
+        {
+          "name": "registerTool",
+          "file": "src/discovery.ts",
+          "line": 585,
+          "ref": "src/discovery.ts:585"
+        },
+        {
+          "name": "registerTool",
+          "file": "src/discovery.ts",
+          "line": 690,
+          "ref": "src/discovery.ts:690"
+        }
+      ],
+      "manifestContracts": [
+        "httpRoutes",
+        "tools"
+      ],
+      "manifestFiles": [
+        "openclaw.plugin.json"
+      ],
+      "sourceFiles": [
+        "dist-test/src/audit.js",
+        "dist-test/src/config.js",
+        "dist-test/src/discovery.js",
+        "dist-test/src/envelope.js",
+        "dist-test/src/index.js",
+        "dist-test/src/injector.js",
+        "dist-test/src/logging.js",
+        "dist-test/src/mirror.js",
+        "dist-test/src/registry.js",
+        "dist-test/src/types.js",
+        "dist/audit.js",
+        "dist/config.js",
+        "dist/discovery.js",
+        "dist/envelope.js",
+        "dist/index.js",
+        "dist/injector.js",
+        "dist/logging.js",
+        "dist/mirror.js",
+        "dist/registry.js",
+        "dist/types.js",
+        "index.js",
+        "scripts/clawhub-publish.js",
+        "src/audit.ts",
+        "src/config.ts",
+        "src/discovery.ts",
+        "src/envelope.ts",
+        "src/index.ts",
+        "src/injector.ts",
+        "src/logging.ts",
+        "src/mirror.ts",
+        "src/registry.ts",
+        "src/types.ts"
+      ],
+      "pluginManifests": [
+        {
+          "path": "openclaw.plugin.json",
+          "id": "openclaw-mesh",
+          "name": "OpenClaw Mesh",
+          "version": null,
+          "keys": [
+            "activation",
+            "configSchema",
+            "contracts",
+            "description",
+            "id",
+            "kind",
+            "name"
+          ],
+          "contracts": [
+            "httpRoutes",
+            "tools"
+          ],
+          "providerAuthEnvVars": {},
+          "channelEnvVars": {},
+          "activation": {
+            "onStartup": true
+          }
+        }
+      ],
+      "securityManifests": [],
+      "package": {
+        "path": "package.json",
+        "name": "@emiltsoi/openclaw-mesh",
+        "version": "0.1.4",
+        "type": "module",
+        "main": "./dist/index.js",
+        "npmPack": {
+          "advertised": false,
+          "private": false,
+          "filesMode": "allowlist",
+          "files": [
+            "dist",
+            "openclaw.plugin.json",
+            "README.md"
+          ],
+          "invalidFileSpecs": []
+        },
+        "dependencies": [
+          "js-yaml"
+        ],
+        "peerDependencies": [
+          "openclaw"
+        ],
+        "optionalDependencies": [],
+        "openclaw": {
+          "extensions": [
+            "./dist/index.js"
+          ],
+          "runtimeExtensions": [],
+          "setupEntry": null,
+          "compatPluginApi": ">=2026.6.11",
+          "buildOpenClawVersion": "2026.6.11",
+          "buildPluginSdkVersion": "2026.6.11",
+          "install": null,
+          "release": null,
+          "unsupportedMetadata": [],
+          "entrypoints": [
+            {
+              "kind": "extension",
+              "specifier": "./dist/index.js",
+              "relativePath": "dist/index.js",
+              "exists": true,
+              "requiresBuild": true
+            }
+          ]
+        }
+      },
+      "packages": [
+        {
+          "path": "package.json",
+          "name": "@emiltsoi/openclaw-mesh",
+          "version": "0.1.4",
+          "type": "module",
+          "main": "./dist/index.js",
+          "npmPack": {
+            "advertised": false,
+            "private": false,
+            "filesMode": "allowlist",
+            "files": [
+              "dist",
+              "openclaw.plugin.json",
+              "README.md"
+            ],
+            "invalidFileSpecs": []
+          },
+          "dependencies": [
+            "js-yaml"
+          ],
+          "peerDependencies": [
+            "openclaw"
+          ],
+          "optionalDependencies": [],
+          "openclaw": {
+            "extensions": [
+              "./dist/index.js"
+            ],
+            "runtimeExtensions": [],
+            "setupEntry": null,
+            "compatPluginApi": ">=2026.6.11",
+            "buildOpenClawVersion": "2026.6.11",
+            "buildPluginSdkVersion": "2026.6.11",
+            "install": null,
+            "release": null,
+            "unsupportedMetadata": [],
+            "entrypoints": [
+              {
+                "kind": "extension",
+                "specifier": "./dist/index.js",
+                "relativePath": "dist/index.js",
+                "exists": true,
+                "requiresBuild": true
+              }
+            ]
+          }
+        }
+      ],
+      "sdkImports": [
+        "openclaw/plugin-sdk/plugin-entry",
+        "openclaw/plugin-sdk/ssrf-runtime",
+        "openclaw/plugin-sdk/webhook-targets"
+      ],
+      "sdkImportDetails": [
+        {
+          "specifier": "openclaw/plugin-sdk/plugin-entry",
+          "file": "dist-test/src/index.js",
+          "line": 2,
+          "ref": "dist-test/src/index.js:2"
+        },
+        {
+          "specifier": "openclaw/plugin-sdk/plugin-entry",
+          "file": "dist/index.js",
+          "line": 2,
+          "ref": "dist/index.js:2"
+        },
+        {
+          "specifier": "openclaw/plugin-sdk/plugin-entry",
+          "file": "src/index.ts",
+          "line": 2,
+          "ref": "src/index.ts:2"
+        },
+        {
+          "specifier": "openclaw/plugin-sdk/ssrf-runtime",
+          "file": "dist-test/src/discovery.js",
+          "line": 14,
+          "ref": "dist-test/src/discovery.js:14"
+        },
+        {
+          "specifier": "openclaw/plugin-sdk/ssrf-runtime",
+          "file": "dist/discovery.js",
+          "line": 14,
+          "ref": "dist/discovery.js:14"
+        },
+        {
+          "specifier": "openclaw/plugin-sdk/ssrf-runtime",
+          "file": "src/discovery.ts",
+          "line": 15,
+          "ref": "src/discovery.ts:15"
+        },
+        {
+          "specifier": "openclaw/plugin-sdk/webhook-targets",
+          "file": "dist-test/src/index.js",
+          "line": 3,
+          "ref": "dist-test/src/index.js:3"
+        },
+        {
+          "specifier": "openclaw/plugin-sdk/webhook-targets",
+          "file": "dist/index.js",
+          "line": 3,
+          "ref": "dist/index.js:3"
+        },
+        {
+          "specifier": "openclaw/plugin-sdk/webhook-targets",
+          "file": "src/index.ts",
+          "line": 3,
+          "ref": "src/index.ts:3"
+        }
+      ],
+      "sdkDeprecations": []
+    }
+  ],
+  "issues": [],
+  "contractProbes": [],
+  "logs": [
+    {
+      "fixture": "openclaw-mesh",
+      "code": "seam-inventory",
+      "level": "log",
+      "message": "observed 1 hooks, 2 registrations, and 2 manifest contracts",
+      "evidence": [
+        "hook:agent_end",
+        "registration:definePluginEntry",
+        "registration:registerTool",
+        "manifestContract:httpRoutes",
+        "manifestContract:tools"
+      ]
+    },
+    {
+      "fixture": "openclaw-mesh",
+      "code": "package-metadata",
+      "level": "log",
+      "message": "selected package metadata for plugin contract checks",
+      "evidence": [
+        "package.json",
+        "@emiltsoi/openclaw-mesh",
+        "version:0.1.4"
+      ]
+    },
+    {
+      "fixture": "openclaw-mesh",
+      "code": "declarative-contracts",
+      "level": "log",
+      "message": "fixture declares manifest contracts that can be checked without executing plugin code",
+      "evidence": [
+        "httpRoutes",
+        "tools"
+      ]
+    },
+    {
+      "fixture": "openclaw",
+      "code": "target-openclaw-unavailable",
+      "level": "log",
+      "message": "target OpenClaw checkout was not available, so compat record coverage was not checked",
+      "evidence": [
+        "not configured"
+      ]
+    }
+  ],
+  "decisions": []
+}

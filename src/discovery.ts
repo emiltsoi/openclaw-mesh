@@ -45,6 +45,28 @@ function safeKey(value: any): string {
     .replace(/^[._-]+|[._-]+$/g, "");
 }
 
+function isPathWithinVault(targetPath: string, vaultPath: string): boolean {
+  const resolvedTarget = path.resolve(targetPath);
+  const resolvedVault = path.resolve(vaultPath);
+  const prefix = `${resolvedVault}${path.sep}`;
+  return resolvedTarget === resolvedVault || resolvedTarget.startsWith(prefix);
+}
+
+function throwIfOutsideVault(targetPath: string, vaultPath: string, operation: string): void {
+  if (!isPathWithinVault(targetPath, vaultPath)) {
+    throw new Error(`${operation} refused: ${targetPath} is outside mesh vault ${vaultPath}`);
+  }
+}
+
+function normalizeAgentName(name: any): string {
+  return String(name || "").trim().toLowerCase();
+}
+
+function hasPathTraversal(name: string): boolean {
+  if (!name) return false;
+  return name.includes("..") || name.includes(path.sep) || name.includes("/") || name.includes("\\");
+}
+
 
 function expandHome(input: string): string {
   if (input.startsWith("~")) {
@@ -202,7 +224,9 @@ export function listPeers(vaultPath: string): MeshPeer[] {
 export function resolvePeer(vaultPath: string, name: string): MeshIdentity | null {
   if (!name || !fs.existsSync(vaultPath)) return null;
   const key = name.toLowerCase();
+  if (hasPathTraversal(key)) return null;
   const directPath = path.join(vaultPath, key, "identity.yaml");
+  throwIfOutsideVault(path.dirname(directPath), vaultPath, "resolvePeer");
   const identity = loadIdentity(directPath);
   if (identity) return identity;
   for (const entry of fs.readdirSync(vaultPath)) {
@@ -347,8 +371,12 @@ export function registerAgent(
     allow_loopback?: boolean;
   } = {},
 ): { ok: boolean; path: string; name: string } {
-  const agentName = String(name || "emts").trim().toLowerCase();
+  const agentName = normalizeAgentName(name) || "emts";
+  if (hasPathTraversal(agentName)) {
+    throw new Error(`registerAgent refused: agent name '${name}' contains path traversal`);
+  }
   const agentDir = path.join(vaultPath, agentName);
+  throwIfOutsideVault(agentDir, vaultPath, "registerAgent");
   const yamlPath = path.join(agentDir, "identity.yaml");
 
   const a2aUrl = options.a2a_url || baseUrl;
@@ -664,7 +692,7 @@ export function registerMeshTools(api: any) {
       name: "mesh_deregister",
       label: "Deregister this agent from the mesh vault or registry",
       description:
-        "Remove this agent's identity from the local mesh vault or the mesh-peer-registry.",
+        "Remove this agent's identity from the local mesh vault or the mesh-peer-registry. This is destructive: by default it returns a dry-run preview and only deletes when force=true. The target path is verified to stay inside the mesh vault.",
       parameters: {
         type: "object",
         properties: {
@@ -672,14 +700,22 @@ export function registerMeshTools(api: any) {
             type: "string",
             description: "Agent name to deregister (defaults to routingAgent)",
           },
+          force: {
+            type: "boolean",
+            description: "Confirm destructive recursive deletion of the agent directory",
+            default: false,
+          },
         },
         required: [],
         additionalProperties: false,
       },
       execute: async (_toolCallId: string, params: any) => {
-        const { name } = params || {};
-        const agentName = String(name || fromName || "emts").trim().toLowerCase();
+        const { name, force } = params || {};
+        const agentName = normalizeAgentName(name) || fromName || "emts";
         if (!agentName) return textResult(JSON.stringify({ error: "'name' is required" }));
+        if (hasPathTraversal(agentName)) {
+          return textResult(JSON.stringify({ ok: false, error: `Agent name '${agentName}' contains path traversal` }));
+        }
 
         if (identitySource === "registry") {
           try {
@@ -693,8 +729,21 @@ export function registerMeshTools(api: any) {
         }
 
         const agentDir = path.join(vaultPath, agentName);
+        if (!isPathWithinVault(agentDir, vaultPath)) {
+          return textResult(JSON.stringify({ ok: false, error: `Agent path '${agentDir}' is outside mesh vault` }));
+        }
         if (!fs.existsSync(agentDir)) {
           return textResult(JSON.stringify({ ok: false, error: `Agent '${agentName}' not found in mesh vault` }));
+        }
+        if (force !== true) {
+          return textResult(JSON.stringify({
+            ok: false,
+            dry_run: true,
+            warning: "mesh_deregister would recursively delete this agent directory",
+            agent: agentName,
+            path: agentDir,
+            hint: "Set force=true to perform the deletion.",
+          }, null, 2));
         }
         try {
           fs.rmSync(agentDir, { recursive: true, force: true });
