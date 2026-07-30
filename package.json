@@ -1,6 +1,6 @@
 {
   "name": "@emiltsoi/openclaw-mesh",
-  "version": "0.1.1",
+  "version": "0.1.7",
   "author": "emiltsoi",
   "type": "module",
   "main": "./dist/index.js",
@@ -35,7 +35,9 @@
     "node": ">=20"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"],
+    "extensions": [
+      "./dist/index.js"
+    ],
     "compat": {
       "pluginApi": ">=2026.6.11",
       "minGatewayVersion": ">=2026.6.11"
