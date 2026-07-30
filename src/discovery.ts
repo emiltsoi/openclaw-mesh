@@ -18,11 +18,13 @@ import {
   resolveDeliveryBackoffMs,
   resolveDeliveryRetries,
   resolveDeliveryTimeoutMs,
+  resolvePrivateNetworkPolicy,
   resolveSecret,
 } from "./config.js";
 import { validateMeshToken } from "./envelope.js";
 import { createDebugLogger } from "./logging.js";
 import { mirrorMessage } from "./mirror.js";
+import { logAudit } from "./audit.js";
 import {
   deregisterPeerOnRegistry,
   getIdentitySource,
@@ -223,7 +225,7 @@ export function makeOutboundPayload(
   const envelopeId = id && typeof id === "string" && id.trim() ? validateMeshToken(id, "envelope id") : `mesh-${crypto.randomUUID()}`;
   validateMeshToken(fromName, "from");
   validateMeshToken(toName, "to");
-  const header = `[mesh][from:${fromName}][to:${toName}][id:${envelopeId}][action:${action}][reply:${reply}]`;
+  const header = `[mesh][v:1][from:${fromName}][to:${toName}][id:${envelopeId}][action:${action}][reply:${reply}]`;
   return `${header} ${message}`;
 }
 
@@ -260,7 +262,11 @@ export async function sendToAgent(
     headers["x-hub-signature-256"] = `sha256=${crypto.createHmac("sha256", signingMaterial).update(body).digest("hex")}`;
   }
 
-  const allowLoopback = !!(peer.allow_loopback || api?.pluginConfig?.allowLoopback);
+  const networkPolicy = resolvePrivateNetworkPolicy(api, peer.allow_loopback === true);
+  const allowLoopback = networkPolicy === "allow";
+  if (networkPolicy === "warn") {
+    debugLog(`sendToAgent: private network policy is "warn"; will block and log for ${webhookUrl}`);
+  }
   const policy = ssrfPolicyFromDangerouslyAllowPrivateNetwork(allowLoopback) ?? undefined;
   const retries = resolveDeliveryRetries(api);
   const initialBackoff = resolveDeliveryBackoffMs(api);
@@ -526,6 +532,15 @@ export function registerMeshTools(api: any) {
 
         const result = await sendToAgent(fromName, signingMaterial, peer, message, action, reply, envelopeId, api, authType);
 
+        logAudit({
+          ts: new Date().toISOString(),
+          event: "mesh_send",
+          agent: fromName,
+          target: agent,
+          success: result.ok,
+          error: result.error,
+        }, extra);
+
         const outboundDisplay = `📤 [Mesh to ${agent}]\n\n${result.text || message}`;
         try {
           await mirrorMessage(extra.mirrorOutbound, outboundDisplay, api);
@@ -605,8 +620,10 @@ export function registerMeshTools(api: any) {
           const targetUrl = webhook_url || `${baseUrl}/plugins/openclaw-mesh/webhook`;
           try {
             await registerPeerOnRegistry(agentName, targetUrl, role || "mesh_peer", description || "", extra);
+            logAudit({ ts: new Date().toISOString(), event: "mesh_register", agent: agentName, target: "registry", success: true }, extra);
             return textResult(JSON.stringify({ ok: true, name: agentName, source: "registry" }, null, 2));
           } catch (e: any) {
+            logAudit({ ts: new Date().toISOString(), event: "mesh_register", agent: agentName, target: "registry", success: false, error: e.message || String(e) }, extra);
             return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
           }
         }
@@ -631,8 +648,10 @@ export function registerMeshTools(api: any) {
             webhook_secret: secret,
             allow_loopback,
           });
+          logAudit({ ts: new Date().toISOString(), event: "mesh_register", agent: agentName, target: "file", success: true }, extra);
           return textResult(JSON.stringify({ ok: true, name: result.name, path: result.path }, null, 2));
         } catch (e: any) {
+          logAudit({ ts: new Date().toISOString(), event: "mesh_register", agent: agentName, target: "file", success: false, error: e.message || String(e) }, extra);
           return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
         }
       },
@@ -665,8 +684,10 @@ export function registerMeshTools(api: any) {
         if (identitySource === "registry") {
           try {
             await deregisterPeerOnRegistry(agentName, extra);
+            logAudit({ ts: new Date().toISOString(), event: "mesh_deregister", agent: agentName, target: "registry", success: true }, extra);
             return textResult(JSON.stringify({ ok: true, name: agentName, source: "registry" }, null, 2));
           } catch (e: any) {
+            logAudit({ ts: new Date().toISOString(), event: "mesh_deregister", agent: agentName, target: "registry", success: false, error: e.message || String(e) }, extra);
             return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
           }
         }
@@ -677,8 +698,10 @@ export function registerMeshTools(api: any) {
         }
         try {
           fs.rmSync(agentDir, { recursive: true, force: true });
+          logAudit({ ts: new Date().toISOString(), event: "mesh_deregister", agent: agentName, target: "file", success: true }, extra);
           return textResult(JSON.stringify({ ok: true, name: agentName, path: agentDir }, null, 2));
         } catch (e: any) {
+          logAudit({ ts: new Date().toISOString(), event: "mesh_deregister", agent: agentName, target: "file", success: false, error: e.message || String(e) }, extra);
           return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
         }
       },

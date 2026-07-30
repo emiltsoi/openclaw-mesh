@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-targets";
 import { resolveSecret } from "./config.js";
+import { logAudit } from "./audit.js";
 import {
   registerMeshTools,
   resolveMeshVaultPath,
@@ -20,7 +21,7 @@ function extractMessageText(payload: any): string {
   if (typeof payload.text === "string") return payload.text;
   if (payload?.envelope) {
     const e = payload.envelope;
-    return `[mesh][from:${e.from || ""}][to:${e.to || ""}][id:${e.id || ""}][action:${e.action || "do"}][reply:${e.reply || "no"}] ${payload.message || ""}`;
+    return `[mesh][v:1][from:${e.from || ""}][to:${e.to || ""}][id:${e.id || ""}][action:${e.action || "do"}][reply:${e.reply || "no"}] ${payload.message || ""}`;
   }
   return "";
 }
@@ -72,6 +73,7 @@ const plugin: any = definePluginEntry({
       replaceExisting: true,
       handler: async (req: any, res: any) => {
         debugLog("handler fired");
+        const extra = resolveMeshExtra(api);
         const chunks: Buffer[] = [];
         for await (const chunk of req) chunks.push(chunk);
         const body = Buffer.concat(chunks);
@@ -147,21 +149,26 @@ const plugin: any = definePluginEntry({
             }
 
             if (!verifyHmacSignature(hubSig, senderSecret, body)) {
+              logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "hmac", agent: fromName, success: false, error: "invalid-signature" }, extra);
               sendJson(res, 403, { status: "forbidden", reason: "invalid-signature" });
               return true;
             }
+            logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "hmac", agent: fromName, success: true }, extra);
           } else if (meshSig) {
             const extra = resolveMeshExtra(api);
             const isRegistry = getIdentitySource(extra) === "registry";
             if (!isRegistry) {
+              logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "ed25519", agent: fromName, success: false, error: "ed25519-not-configured" }, extra);
               sendJson(res, 403, { status: "forbidden", reason: "ed25519-not-configured" });
               return true;
             }
             const ok = await verifyEd25519Signature(req.headers, body, fromName, extra);
             if (!ok) {
+              logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "ed25519", agent: fromName, success: false, error: "invalid-signature" }, extra);
               sendJson(res, 403, { status: "forbidden", reason: "invalid-signature" });
               return true;
             }
+            logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "ed25519", agent: fromName, success: true }, extra);
           }
 
           // HMAC verified. Enforce that the envelope sender matches the signed payload.
@@ -173,6 +180,7 @@ const plugin: any = definePluginEntry({
           const messageText = text.replace(/^\[mesh\](?:\[[^\]]*:[^\]]*\])*\s*/, "");
           await injectIntoSession(api, messageText, envelope);
 
+          logAudit({ ts: new Date().toISOString(), event: "webhook_receive", agent: fromName, target: envelope.to, success: true }, extra);
           sendJson(res, 200, { status: "ok" });
           return true;
         } catch (e: any) {

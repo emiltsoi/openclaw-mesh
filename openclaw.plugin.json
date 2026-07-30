@@ -93,6 +93,17 @@
         "description": "Allow outbound webhook deliveries to loopback/private addresses",
         "default": false
       },
+      "privateNetworkPolicy": {
+        "type": "string",
+        "enum": ["allow", "warn", "deny"],
+        "description": "Private network policy for outbound webhook delivery",
+        "default": "deny"
+      },
+      "auditLogPath": {
+        "type": "string",
+        "description": "Path to the append-only audit log (JSON lines)",
+        "default": "/tmp/openclaw-mesh/audit.jsonl"
+      },
       "deliveryRetries": {
         "type": "integer",
         "description": "Number of outbound webhook delivery attempts",
