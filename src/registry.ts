@@ -13,6 +13,35 @@ import { createDebugLogger } from "./logging.js";
 
 const debugLog = createDebugLogger();
 
+const _peerCache = new Map<string, { data: RegistryPeer | null; expiry: number }>();
+const _listCache = new Map<string, { data: RegistryPeer[]; expiry: number }>();
+const _keyCache = new Map<string, { data: { privatePem: string; publicPem: string }; expiry: number }>();
+
+const _CACHE_TTL_MS = 30_000;
+const _CACHE_MAX_SIZE = 256;
+
+function _cacheEvictIfNeeded(map: Map<string, any>): void {
+  if (map.size >= _CACHE_MAX_SIZE) {
+    const firstKey = map.keys().next().value as string | undefined;
+    if (firstKey !== undefined) map.delete(firstKey);
+  }
+}
+
+function _cacheGet<T>(map: Map<string, { data: T; expiry: number }>, key: string): T | undefined {
+  const entry = map.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiry) {
+    map.delete(key);
+    return undefined;
+  }
+  return entry.data;
+}
+
+function _cacheSet<T>(map: Map<string, { data: T; expiry: number }>, key: string, value: T): void {
+  _cacheEvictIfNeeded(map);
+  map.set(key, { data: value, expiry: Date.now() + _CACHE_TTL_MS });
+}
+
 export interface RegistryPeer {
   name: string;
   url: string;
@@ -22,7 +51,7 @@ export interface RegistryPeer {
 }
 
 export interface RegistryClient {
-  register(name: string, url: string, role?: string, description?: string): Promise<{ ok: boolean }>;
+  register(name: string, url: string, role?: string, description?: string, ttl?: number): Promise<{ ok: boolean }>;
   deregister(name: string): Promise<{ ok: boolean }>;
   listPeers(): Promise<RegistryPeer[]>;
   getPeer(name: string): Promise<RegistryPeer | null>;
@@ -73,20 +102,31 @@ export function loadOrGenerateKeyPair(
   extra?: MeshBridgePluginConfig,
 ): { privatePem: string; publicPem: string } {
   const keyPath = getPrivateKeyPath(name, extra);
+  const cacheKey = keyPath;
+  const cached = _cacheGet(_keyCache, cacheKey);
+  if (cached) {
+    debugLog(`loadOrGenerateKeyPair: cache hit for ${name}`);
+    return cached;
+  }
+
+  let result: { privatePem: string; publicPem: string };
   if (fs.existsSync(keyPath)) {
     const privatePem = fs.readFileSync(keyPath, "utf-8");
     const publicKey = crypto.createPublicKey(privatePem);
     const publicPem = publicKey.export({ type: "spki", format: "pem" }).toString();
-    return { privatePem, publicPem };
+    result = { privatePem, publicPem };
+  } else {
+    ensureKeyDir(keyPath);
+    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    fs.writeFileSync(keyPath, privateKey, { mode: 0o600 });
+    result = { privatePem: privateKey, publicPem: publicKey };
   }
 
-  ensureKeyDir(keyPath);
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
-    publicKeyEncoding: { type: "spki", format: "pem" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  fs.writeFileSync(keyPath, privateKey, { mode: 0o600 });
-  return { privatePem: privateKey, publicPem: publicKey };
+  _cacheSet(_keyCache, cacheKey, result);
+  return result;
 }
 
 function privateKeyFor(name: string, extra?: MeshBridgePluginConfig): crypto.KeyObject {
@@ -140,14 +180,16 @@ export function createRegistryClient(
   }
 
   return {
-    async register(name, url, role = "agent", description = ""): Promise<{ ok: boolean }> {
-      const res = await signedFetch("POST", "/register", {
+    async register(name, url, role = "agent", description = "", ttl?: number): Promise<{ ok: boolean }> {
+      const payload: Record<string, any> = {
         name,
         url,
         public_key: publicPem,
         role,
         description,
-      });
+      };
+      if (ttl !== undefined) payload.ttl = ttl;
+      const res = await signedFetch("POST", "/register", payload);
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`registry register failed: HTTP ${res.status}: ${text.slice(0, 200)}`);
@@ -174,6 +216,12 @@ export function createRegistryClient(
     },
 
     async listPeers(): Promise<RegistryPeer[]> {
+      const cacheKey = `${baseUrl}:peers`;
+      const cached = _cacheGet(_listCache, cacheKey);
+      if (cached) {
+        debugLog(`listPeers: cache hit for ${baseUrl}`);
+        return cached;
+      }
       const res = await fetch(`${baseUrl}/peers`, {
         method: "GET",
         signal: AbortSignal.timeout(10_000),
@@ -181,33 +229,46 @@ export function createRegistryClient(
       if (!res.ok) return [];
       const json: any = await res.json();
       if (!Array.isArray(json)) return [];
-      return json.map((p) => ({
+      const peers = json.map((p) => ({
         name: p.name || "",
         url: p.url || "",
         public_key: p.public_key || "",
         role: p.role || "agent",
         description: p.description || "",
       }));
+      _cacheSet(_listCache, cacheKey, peers);
+      return peers;
     },
 
     async getPeer(name): Promise<RegistryPeer | null> {
+      const cacheKey = `${baseUrl}:peer:${name}`;
+      const cached = _cacheGet(_peerCache, cacheKey);
+      if (cached !== undefined) {
+        debugLog(`getPeer: cache hit for ${name}`);
+        return cached;
+      }
       const res = await fetch(`${baseUrl}/peers/${encodeURIComponent(name)}`, {
         method: "GET",
         signal: AbortSignal.timeout(10_000),
       });
-      if (res.status === 404) return null;
+      if (res.status === 404) {
+        _cacheSet(_peerCache, cacheKey, null);
+        return null;
+      }
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`registry getPeer failed: HTTP ${res.status}: ${text.slice(0, 200)}`);
       }
       const p: any = await res.json();
-      return {
+      const peer: RegistryPeer = {
         name: p.name || "",
         url: p.url || "",
         public_key: p.public_key || "",
         role: p.role || "agent",
         description: p.description || "",
       };
+      _cacheSet(_peerCache, cacheKey, peer);
+      return peer;
     },
   };
 }

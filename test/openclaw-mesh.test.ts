@@ -297,7 +297,7 @@ describe("resolvePeer", () => {
 describe("makeOutboundPayload", () => {
   it("builds an mesh envelope from the bridge to a peer", () => {
     const payload = makeOutboundPayload("emts", "agent0", "ping");
-    assert.ok(payload.startsWith("[mesh][from:emts][to:agent0]"));
+    assert.ok(payload.startsWith("[mesh][v:1][from:emts][to:agent0]"));
     assert.ok(payload.includes("[action:do][reply:yes] ping"));
   });
 });
@@ -340,7 +340,7 @@ describe("sendToAgent", () => {
       assert.ok(body, "request body was captured");
       const payload = JSON.parse(body);
       assert.equal(payload.from, "emts");
-      assert.ok(payload.text.startsWith("[mesh][from:emts][to:agent0]"));
+      assert.ok(payload.text.startsWith("[mesh][v:1][from:emts][to:agent0]"));
       assert.ok(payload.text.includes("[action:info][reply:no] ping"));
 
       const headers = captured.headers;

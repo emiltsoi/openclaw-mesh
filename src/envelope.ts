@@ -1,4 +1,5 @@
 export interface MeshEnvelope {
+  v?: string;
   from: string;
   to: string;
   id: string;
@@ -40,6 +41,9 @@ export function parseMeshEnvelope(text: string): MeshEnvelope | null {
     const [, key, rawValue] = match;
     const value = rawValue.trim();
     switch (key) {
+      case "v":
+        envelope.v = value;
+        break;
       case "from":
         envelope.from = value;
         break;

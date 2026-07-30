@@ -52,3 +52,18 @@ export function isDebugEnabled(api?: { pluginConfig?: MeshBridgePluginConfig }):
   const env = process.env.OPENCLAW_MESH_DEBUG || process.env.A2A_BRIDGE_DEBUG || "";
   return env === "1" || env.toLowerCase() === "true";
 }
+
+export type PrivateNetworkPolicy = "allow" | "warn" | "deny";
+
+export function resolvePrivateNetworkPolicy(
+  api?: { pluginConfig?: MeshBridgePluginConfig },
+  peerAllowLoopback = false,
+): PrivateNetworkPolicy {
+  const pluginCfg = api?.pluginConfig || {};
+  const cfg = pluginCfg.privateNetworkPolicy || pluginCfg.private_network_policy;
+  if (cfg === "allow" || cfg === "warn" || cfg === "deny") return cfg;
+  if (pluginCfg.allowLoopback === true || peerAllowLoopback) return "allow";
+  const env = process.env.OPENCLAW_MESH_ALLOW_LOOPBACK || process.env.A2A_WEBHOOK_ALLOW_LOOPBACK || "";
+  if (env === "1" || env.toLowerCase() === "true") return "allow";
+  return "deny";
+}

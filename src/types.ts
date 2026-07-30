@@ -30,6 +30,12 @@ export interface MeshBridgePluginConfig {
   debug?: boolean;
   /** Allow outbound webhook deliveries to loopback/private addresses. */
   allowLoopback?: boolean;
+  /** Private network policy for outbound delivery: "allow", "warn", or "deny". */
+  privateNetworkPolicy?: "allow" | "warn" | "deny";
+  private_network_policy?: "allow" | "warn" | "deny";
+  /** Optional path to the audit log (JSON lines). */
+  auditLogPath?: string;
+  audit_log_path?: string;
   /** Number of outbound webhook delivery attempts. */
   deliveryRetries?: number;
   /** Initial retry backoff in milliseconds. */
