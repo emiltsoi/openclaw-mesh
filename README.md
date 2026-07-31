@@ -1,6 +1,6 @@
 # openclaw-mesh
 
-Stateful, signed agent-to-agent mesh messaging for OpenClaw. Use it to let one OpenClaw agent send messages to another OpenClaw agent, or to bridge OpenClaw agents to [Hermes](https://github.com/emiltsoi/hermes-mesh) mesh peers. All traffic is carried over the `[mesh]` envelope format with per-agent HMAC-SHA256 signatures, durable inbox persistence, and SSRF-protected outbound delivery.
+Stateful, signed agent-to-agent mesh messaging for OpenClaw. Use it to let one OpenClaw agent send messages to another OpenClaw agent, or to bridge OpenClaw agents to [Hermes](https://github.com/emiltsoi/hermes-mesh) mesh peers. All traffic is carried over the `[mesh]` envelope format with per-agent HMAC-SHA256 or Ed25519 signatures (file vault vs. [mesh-peer-registry](https://github.com/emiltsoi/mesh-peer-registry) mode), durable inbox persistence, and SSRF-protected outbound delivery.
 
 ## What it does
 
@@ -113,6 +113,10 @@ Restart the OpenClaw gateway after changing source or `openclaw.plugin.json`.
 | `deliveryRetries` | `3` | Number of outbound webhook delivery attempts. |
 | `deliveryBackoffMs` | `1000` | Initial retry backoff in milliseconds. |
 | `deliveryTimeoutMs` | `15000` | Per-attempt delivery timeout in milliseconds. |
+| `identitySource` | `file` | Where to store and discover mesh identities: `file` (local mesh vault) or `registry` (mesh-peer-registry). |
+| `registryUrl` | — | URL of the mesh-peer-registry server (e.g. `http://127.0.0.1:8646`). Required when `identitySource` is `registry`. |
+| `privateKeyPath` | `~/.mesh/keys/<routingAgent>.pem` | Path to the local Ed25519 private key PEM. Used for registry signing; generated on first use if missing. |
+| `auditLogPath` | — | Optional JSON-lines audit log file for mesh traffic. Falls back to `OPENCLAW_MESH_AUDIT_LOG`. |
 
 The shared secret is resolved in this order:
 
@@ -137,7 +141,7 @@ Supported values:
 
 ## Mesh Vault Discovery
 
-The plugin reads a file-based mesh vault. Each agent has a directory with an `identity.yaml` file under `<vault-root>/mesh/agents`, e.g.:
+The plugin can discover peers from a **file-based mesh vault** (default, `identitySource: "file"`) or from a shared [`mesh-peer-registry`](https://github.com/emiltsoi/mesh-peer-registry) server (`identitySource: "registry"`).
 
 ```
 $OPENCLAW_STATE_DIR/mesh/mesh/agents/
@@ -193,6 +197,33 @@ It resolves in this order:
 2. `MESH_VAULT_PATH` environment variable — mesh vault root (supports `~` and relative paths)
 3. `HERMES_HOME` (with `/profiles/<name>` stripped) + `/fleet/mesh/agents`
 4. Fallback to `$OPENCLAW_STATE_DIR/mesh` (or `/tmp/openclaw-mesh` if `OPENCLAW_STATE_DIR` is not set)
+
+### Mesh Peer Registry
+
+For a centralized, multi-host discovery backend you can use [`mesh-peer-registry`](https://github.com/emiltsoi/mesh-peer-registry) (also on [PyPI](https://pypi.org/project/mesh-peer-registry/)):
+
+```bash
+pip install mesh-peer-registry
+mesh-peer-registry --port 8646 --store ~/.mesh/registry.sqlite
+```
+
+Then point `openclaw-mesh` at it:
+
+```json
+{
+  "identitySource": "registry",
+  "registryUrl": "http://127.0.0.1:8646",
+  "privateKeyPath": "~/.mesh/keys/emts.pem"
+}
+```
+
+In registry mode:
+
+- `mesh_list` fetches peers from the registry.
+- `mesh_register` publishes this peer to the registry with an Ed25519 signature.
+- `mesh_send` resolves the target peer's public key and webhook URL from the registry and signs outbound messages with Ed25519; the receiver verifies the sender's public key against the registry.
+
+The registry is language-agnostic: Hermes peers and OpenClaw peers can share the same `mesh-peer-registry` instance. See the [mesh-peer-registry README](https://github.com/emiltsoi/mesh-peer-registry/blob/main/README.md) for API details.
 
 ## Registering an OpenClaw agent
 
@@ -285,8 +316,9 @@ CI is configured in `.github/workflows/ci.yml` and runs `typecheck`, `build`, an
 |----------|-----------|
 | Hermes | [hermes-mesh](https://github.com/emiltsoi/hermes-mesh) |
 | OpenClaw | openclaw-mesh (this repo) |
+| Shared registry | [mesh-peer-registry](https://github.com/emiltsoi/mesh-peer-registry) / [PyPI](https://pypi.org/project/mesh-peer-registry/) |
 
-Both sides use the same envelope format and HMAC scheme.
+Hermes and OpenClaw use the same `[mesh]` envelope format. File-based discovery uses HMAC-SHA256 (`webhook_secret`); registry mode uses Ed25519 signatures via `mesh-peer-registry`.
 
 ## License
 

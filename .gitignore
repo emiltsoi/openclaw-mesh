@@ -6,3 +6,6 @@ dist-test/
 /a2a-inbox.jsonl
 *.log
 coverage/
+*.tgz
+clawhub-scan-*.zip
+/reports/
