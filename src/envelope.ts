@@ -5,6 +5,8 @@ export interface MeshEnvelope {
   id: string;
   action: "do" | "info";
   reply: "yes" | "no";
+  ref?: string;
+  dsn?: boolean;
 }
 
 const ENVELOPE_HEADER_RE = /^(\[mesh\](?:\[[^\]]*:[^\]]*\])*)/;
@@ -59,7 +61,20 @@ export function parseMeshEnvelope(text: string): MeshEnvelope | null {
       case "reply":
         if (value === "yes" || value === "no") envelope.reply = value;
         break;
+      case "ref":
+        try {
+          envelope.ref = validateMeshToken(value, "ref");
+        } catch {
+          // Drop an invalid ref instead of failing the whole message.
+          envelope.ref = undefined;
+        }
+        break;
     }
+  }
+
+  const body = stripEnvelope(text);
+  if (body.startsWith("[mesh-dsn]")) {
+    envelope.dsn = true;
   }
 
   return envelope;
@@ -69,4 +84,21 @@ export function stripEnvelope(text: string): string {
   const match = ENVELOPE_HEADER_RE.exec(text);
   if (!match) return text;
   return text.slice(match[0].length).trimStart();
+}
+
+export function validateTimestamp(headers: Record<string, string | undefined>): { ok: boolean; reason?: string } {
+  const raw = headers["x-mesh-timestamp"];
+  if (raw === undefined || raw === "") {
+    return { ok: false, reason: "missing x-mesh-timestamp" };
+  }
+  const ts = Number(raw);
+  if (!Number.isFinite(ts) || Number.isNaN(ts)) {
+    return { ok: false, reason: "invalid x-mesh-timestamp" };
+  }
+  const now = Math.floor(Date.now() / 1000);
+  // 300s tolerance matches hermes-mesh.
+  if (Math.abs(now - ts) > 300) {
+    return { ok: false, reason: "x-mesh-timestamp outside replay window" };
+  }
+  return { ok: true };
 }

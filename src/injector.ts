@@ -9,6 +9,8 @@ import type { MeshEnvelope } from "./envelope.js";
 import { validateMeshToken } from "./envelope.js";
 import { createDebugLogger } from "./logging.js";
 import { mirrorMessage } from "./mirror.js";
+import { sendDeliveryError } from "./discovery.js";
+import { resolveEffectivePluginConfig } from "./config.js";
 import type { MeshBridgePluginConfig } from "./types.js";
 
 const DEFAULT_INBOX = "/tmp/openclaw-mesh/mesh-inbox.jsonl";
@@ -37,7 +39,8 @@ export async function injectIntoSession(
   messageText: string,
   envelope: MeshEnvelope,
 ): Promise<void> {
-  const pluginCfg: MeshBridgePluginConfig = api.pluginConfig || {};
+  const pluginCfg: MeshBridgePluginConfig = resolveEffectivePluginConfig(api);
+  const meshApi = { pluginConfig: pluginCfg, resolvePath: typeof api.resolvePath === "function" ? api.resolvePath : undefined };
   const globalCfg = api.config || {};
 
   // Defensive: validate tokens before reconstructing the header.
@@ -112,6 +115,23 @@ export async function injectIntoSession(
   }).catch(async (e: any) => {
     const errorText = `⚠️ Mesh run failed: ${e.message || e}\n\nInbound message:\n${messageText}`;
     debugLog(`embedded agent run failed: ${e.message || e}`);
+
+    // Best-effort DSN to the sender so they know injection failed.
+    try {
+      const routingAgent = pluginCfg.targetAgentId || "emts";
+      await sendDeliveryError(
+        envelope.to,
+        envelope.from,
+        envelope.id,
+        "injection-failed",
+        envelope.from,
+        envelope.to,
+        envelope.ref,
+        meshApi,
+      );
+    } catch (dsnErr: any) {
+      debugLog(`embedded agent run failed: DSN could not be sent: ${dsnErr.message || dsnErr}`);
+    }
 
     // Fallback 1: mirror the failure so it is visible.
     await mirrorMessage(pluginCfg.mirrorInbound, errorText, api);

@@ -18,6 +18,7 @@ import {
   resolveDeliveryBackoffMs,
   resolveDeliveryRetries,
   resolveDeliveryTimeoutMs,
+  resolveEffectivePluginConfig,
   resolvePrivateNetworkPolicy,
   resolveSecret,
 } from "./config.js";
@@ -245,16 +246,58 @@ export function makeOutboundPayload(
   action = "do",
   reply = "yes",
   id?: string,
+  ref?: string,
 ): string {
   const envelopeId = id && typeof id === "string" && id.trim() ? validateMeshToken(id, "envelope id") : `mesh-${crypto.randomUUID()}`;
   validateMeshToken(fromName, "from");
   validateMeshToken(toName, "to");
-  const header = `[mesh][v:1][from:${fromName}][to:${toName}][id:${envelopeId}][action:${action}][reply:${reply}]`;
+  let header = `[mesh][v:1][from:${fromName}][to:${toName}][id:${envelopeId}][action:${action}][reply:${reply}]`;
+  if (ref && typeof ref === "string" && ref.trim()) {
+    try {
+      header += `[ref:${validateMeshToken(ref, "ref")}]`;
+    } catch {
+      // drop an invalid ref rather than failing the whole send
+    }
+  }
   return `${header} ${message}`;
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function statusFromError(err: Error | undefined): number | undefined {
+  if (!err) return undefined;
+  const match = err.message.match(/\bHTTP\s+(\d{3})\b/);
+  if (match) return parseInt(match[1], 10);
+  return undefined;
+}
+
+function dsnEnabled(api?: any): boolean {
+  const explicit = process.env.OPENCLAW_MESH_DSN_ENABLED;
+  if (typeof explicit === "string") {
+    return ["1", "true", "yes"].includes(explicit.toLowerCase());
+  }
+  const cfg = api?.pluginConfig || {};
+  if (typeof cfg.dsnEnabled === "boolean") return cfg.dsnEnabled;
+  return true; // on by default
+}
+
+function mapFailureReason(lastError: Error | undefined, status?: number): string {
+  if (status !== undefined) {
+    if (status === 401 || status === 403) return "unauthorized";
+    if (status === 404) return "not-found";
+    if (status === 400) return "bad-request";
+    if (status === 429) return "rate-limited";
+    if (status === 503) return "busy";
+    if (status >= 500) return "internal-error";
+  }
+  const msg = String(lastError?.message || "").toLowerCase();
+  if (msg.includes("private") || msg.includes("loopback") || msg.includes("blocked") || msg.includes("ssrf")) {
+    return "loopback-blocked";
+  }
+  if (msg.includes("timeout") || msg.includes("abort")) return "unreachable";
+  return "unreachable";
 }
 
 export async function sendToAgent(
@@ -267,6 +310,8 @@ export async function sendToAgent(
   id?: string,
   api?: any,
   authType = "hmac-sha256",
+  ref?: string,
+  isDsn = false,
 ): Promise<{ ok: boolean; status?: number; error?: string; delivery_id?: string; text?: string }> {
   const webhookUrl = peer.webhook_url || peer.transports?.hermes_webhook?.url || "";
   if (!webhookUrl) return { ok: false, error: "peer has no hermes_webhook url" };
@@ -274,11 +319,14 @@ export async function sendToAgent(
   const toName = String(peer.id || peer.name || "unknown").toLowerCase();
   const payload = {
     from: fromName,
-    text: makeOutboundPayload(fromName, toName, message, action, reply, id),
+    text: makeOutboundPayload(fromName, toName, message, action, reply, id, ref),
   };
   const body = JSON.stringify(payload, Object.keys(payload).sort());
 
   const headers: Record<string, string> = { "content-type": "application/json" };
+  if (isDsn) {
+    headers["x-mesh-dsn"] = "1";
+  }
   if (authType === "ed25519") {
     headers["x-mesh-timestamp"] = String(Math.floor(Date.now() / 1000));
     headers["x-mesh-signature"] = signMessage(signingMaterial, body);
@@ -340,7 +388,92 @@ export async function sendToAgent(
     }
   }
 
+  const reason = mapFailureReason(lastError, statusFromError(lastError));
+  if (!isDsn && dsnEnabled(api)) {
+    try {
+      const dsnTo = ref ? toName : fromName;
+      const envelopeId = id && typeof id === "string" ? id : `mesh-${crypto.randomUUID()}`;
+      await sendDeliveryError(fromName, dsnTo, envelopeId, reason, fromName, toName, ref, api);
+    } catch (e: any) {
+      debugLog(`sendToAgent: DSN for failed delivery to ${toName} could not be sent: ${e.message || e}`);
+    }
+  }
   return { ok: false, error: lastError?.message || String(lastError), text: payload.text };
+}
+
+export async function sendDeliveryError(
+  dsnFrom: string,
+  dsnTo: string,
+  originalId: string,
+  reason: string,
+  originalFrom: string,
+  originalTo: string,
+  originalRef: string | undefined,
+  api: any,
+): Promise<void> {
+  if (!dsnEnabled(api)) return;
+
+  const extra = resolveMeshExtra(api);
+  const identitySource = getIdentitySource(extra);
+  const resolvePath = typeof api.resolvePath === "function" ? api.resolvePath : undefined;
+  const vaultPath = resolveMeshVaultPath(extra, resolvePath);
+  const legacyVaultPath = resolveLegacyMeshVaultPath(extra, resolvePath);
+
+  let dsnFromPeer: MeshIdentity | null = null;
+  let dsnToPeer: MeshIdentity | null = null;
+  let signingMaterial = "";
+  let authType = "hmac-sha256";
+
+  if (identitySource === "registry") {
+    try {
+      const sender = await resolveSenderFromRegistry(dsnFrom, extra);
+      if (!sender) {
+        debugLog(`sendDeliveryError: sender '${dsnFrom}' has no Ed25519 key in registry`);
+        return;
+      }
+      signingMaterial = sender.material;
+      authType = "ed25519";
+    } catch (e: any) {
+      debugLog(`sendDeliveryError: could not resolve sender from registry: ${e.message || e}`);
+      return;
+    }
+    try {
+      dsnToPeer = await resolveTargetFromRegistry(dsnTo, extra);
+    } catch (e: any) {
+      debugLog(`sendDeliveryError: could not resolve target from registry: ${e.message || e}`);
+      return;
+    }
+  } else {
+    dsnFromPeer = resolvePeer(vaultPath, dsnFrom) || resolvePeer(legacyVaultPath, dsnFrom);
+    if (!dsnFromPeer) {
+      debugLog(`sendDeliveryError: sender '${dsnFrom}' not found in vault`);
+      return;
+    }
+    const fromTransport = dsnFromPeer.transports?.hermes_webhook || dsnFromPeer.webhook_secret
+      ? { auth: { secret: dsnFromPeer.webhook_secret } }
+      : undefined;
+    signingMaterial = fromTransport?.auth?.secret || dsnFromPeer.webhook_secret || "";
+    if (!signingMaterial) {
+      debugLog(`sendDeliveryError: sender '${dsnFrom}' has no webhook secret`);
+      return;
+    }
+    dsnToPeer = resolvePeer(vaultPath, dsnTo) || resolvePeer(legacyVaultPath, dsnTo);
+  }
+
+  if (!dsnToPeer) {
+    debugLog(`sendDeliveryError: target '${dsnTo}' not found`);
+    return;
+  }
+
+  const safeReason = String(reason || "unreachable").replace(/[^A-Za-z0-9_.:-]/g, "_").slice(0, 32);
+  const dsnId = `mesh-${crypto.randomUUID()}`;
+  const bodyText = `[mesh-dsn][status:failed][reason:${safeReason}] Delivery of message ${originalId} from ${originalFrom} to ${originalTo} failed: ${safeReason}.`;
+
+  try {
+    await sendToAgent(dsnFrom, signingMaterial, dsnToPeer, bodyText, "info", "no", dsnId, api, authType, originalId, true);
+  } catch (e: any) {
+    debugLog(`sendDeliveryError: DSN delivery to '${dsnTo}' failed: ${e.message || e}`);
+  }
 }
 
 export function resolveGatewayUrl(api: any): string {
@@ -437,6 +570,8 @@ export function registerMeshTools(api: any) {
   }
 
   const extra = resolveMeshExtra(api);
+  const effectiveCfg = resolveEffectivePluginConfig(api);
+  const meshApi = { pluginConfig: effectiveCfg };
   const resolvePath = typeof api.resolvePath === "function" ? api.resolvePath : undefined;
   const fromName = extra.routingAgent || process.env.MESH_AGENT_NAME || process.env.A2A_AGENT_NAME || "emts";
   const identitySource = getIdentitySource(extra);
@@ -528,12 +663,16 @@ export function registerMeshTools(api: any) {
             type: "string",
             description: "Alias for id. For replies, reuse the incoming message's id.",
           },
+          ref: {
+            type: "string",
+            description: "Optional message ID being replied to. For replies, set this to the incoming message's id.",
+          },
         },
         required: ["agent", "message"],
         additionalProperties: false,
       },
       execute: async (_toolCallId: string, params: any) => {
-        const { agent, message, action = "do", reply = "yes", id, thread_id } = params || {};
+        const { agent, message, action = "do", reply = "yes", id, thread_id, ref } = params || {};
         const envelopeId = id || thread_id;
         if (!agent || typeof agent !== "string") return textResult(JSON.stringify({ error: "'agent' is required" }));
         if (!message || typeof message !== "string") return textResult(JSON.stringify({ error: "'message' is required" }));
@@ -558,7 +697,7 @@ export function registerMeshTools(api: any) {
           signingMaterial = pluginSecret;
         }
 
-        const result = await sendToAgent(fromName, signingMaterial, peer, message, action, reply, envelopeId, api, authType);
+        const result = await sendToAgent(fromName, signingMaterial, peer, message, action, reply, envelopeId, meshApi, authType, ref, false);
 
         logAudit({
           ts: new Date().toISOString(),
