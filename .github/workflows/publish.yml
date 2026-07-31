@@ -1,4 +1,4 @@
-name: Publish to npm and Clawhub
+name: Publish
 
 on:
   push:
@@ -9,6 +9,8 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -34,19 +36,23 @@ jobs:
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN secret is not set; skipping npm publish."
+            exit 0
+          fi
+          npm publish --access public
 
-      - name: Package plugin tarball
-        run: npm pack
-
-      - name: Publish to Clawhub
+      - name: Publish to ClawHub
         env:
-          CLAWHUB_URL: ${{ secrets.CLAWHUB_URL }}
           CLAWHUB_API_TOKEN: ${{ secrets.CLAWHUB_API_TOKEN }}
         run: |
-          tarball=$(ls *.tgz)
-          if [ -n "$CLAWHUB_URL" ] && [ -n "$CLAWHUB_API_TOKEN" ]; then
-            curl -sfS -H "Authorization: Bearer $CLAWHUB_API_TOKEN" \
-              -F "package=@$tarball" \
-              "$CLAWHUB_URL/api/plugins/upload" || true
+          if [ -z "$CLAWHUB_API_TOKEN" ]; then
+            echo "CLAWHUB_API_TOKEN secret is not set; skipping ClawHub publish."
+            exit 0
           fi
+          npx -y clawhub@latest login --token "$CLAWHUB_API_TOKEN" --no-browser
+          npx -y clawhub@latest package publish . \
+            --source-repo "${{ github.repository }}" \
+            --source-commit "${{ github.sha }}" \
+            --source-ref "${{ github.ref_name }}"
