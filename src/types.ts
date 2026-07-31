@@ -4,10 +4,6 @@
 export interface MeshBridgePluginConfig {
   /** mesh agent name this bridge accepts messages for. */
   routingAgent?: string;
-  /** HMAC-SHA256 shared secret for inbound webhook verification. */
-  secret?: string;
-  /** Environment variable name for the shared secret. */
-  secretEnvVar?: string;
   /** Target OpenClaw session key (e.g. "agent:main:main"). */
   targetSessionKey?: string;
   /** Target OpenClaw agent ID (e.g. "main"). */
@@ -42,15 +38,21 @@ export interface MeshBridgePluginConfig {
   deliveryBackoffMs?: number;
   /** Per-attempt delivery timeout in milliseconds. */
   deliveryTimeoutMs?: number;
-  /** Identity source: "file" (default, local mesh vault) or "registry" (mesh-peer-registry). */
-  identitySource?: string;
-  identity_source?: string;
-  /** mesh-peer-registry URL (required when identitySource is "registry"). */
+  /** mesh-peer-registry URL. Optional; when set, registry tools can sync/publish. */
   registryUrl?: string;
   registry_url?: string;
-  /** Path to the local Ed25519 private key PEM (used with identitySource="registry"). */
+  /** Path to the local Ed25519 private key PEM. */
   privateKeyPath?: string;
   private_key_path?: string;
+  /** Whether to sign the X-Mesh-Timestamp header in outbound payloads. Default true. */
+  signTimestamp?: boolean;
+  sign_timestamp?: boolean;
+  /** Allow insecure http registry URLs. */
+  allowInsecureRegistry?: boolean;
+  allow_insecure_registry?: boolean;
+  /** SHA-256 hex digest of the registry server's certificate SPKI for pinning. */
+  registryPin?: string;
+  registry_pin?: string;
 }
 
 export interface MeshIdentity {
@@ -61,7 +63,6 @@ export interface MeshIdentity {
   platforms?: Record<string, any>;
   transports?: Record<string, any>;
   webhook_url?: string;
-  webhook_secret?: string;
   a2a_url?: string;
   allow_loopback?: boolean;
   [key: string]: any;
@@ -72,6 +73,7 @@ export interface MeshPeer {
   platform?: string;
   a2a_url?: string;
   webhook_url?: string;
+  public_key?: string;
   description?: string;
   role?: string;
 }

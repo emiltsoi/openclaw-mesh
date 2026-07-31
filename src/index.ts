@@ -1,7 +1,6 @@
-import crypto from "node:crypto";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-targets";
-import { resolveEffectivePluginConfig, resolveSecret } from "./config.js";
+import { resolveEffectivePluginConfig, resolveMeshExtra } from "./config.js";
 import { logAudit } from "./audit.js";
 import {
   registerMeshTools,
@@ -10,10 +9,10 @@ import {
   resolvePeer,
   sendDeliveryError,
 } from "./discovery.js";
-import { parseMeshEnvelope, validateMeshToken, validateTimestamp } from "./envelope.js";
+import { parseMeshEnvelope, validateMeshToken } from "./envelope.js";
 import { injectIntoSession } from "./injector.js";
 import { createDebugLogger, setDebugEnabled } from "./logging.js";
-import { resolveMeshExtra, getIdentitySource, verifyEd25519Signature } from "./registry.js";
+import { verifyEd25519Signature } from "./registry.js";
 import type { MeshBridgePluginConfig } from "./types.js";
 
 const debugLog = createDebugLogger();
@@ -31,25 +30,7 @@ export function extractMessageText(payload: any): string {
   return "";
 }
 
-export function verifyHmacSignature(sigHeader: string, secret: string, body: Buffer, timestamp?: string): boolean {
-  const expected = sigHeader.startsWith("sha256=") ? sigHeader.slice(7) : sigHeader;
-  const expectedBuf = Buffer.from(expected);
-
-  function check(computed: string): boolean {
-    const computedBuf = Buffer.from(computed);
-    return computedBuf.length === expectedBuf.length && crypto.timingSafeEqual(computedBuf, expectedBuf);
-  }
-
-  // Try timestamped HMAC first, then legacy body-only HMAC for backward compatibility.
-  if (timestamp !== undefined) {
-    const withTs = crypto.createHmac("sha256", secret).update(`${timestamp}\n`).update(body).digest("hex");
-    if (check(withTs)) return true;
-  }
-  const legacy = crypto.createHmac("sha256", secret).update(body).digest("hex");
-  return check(legacy);
-}
-
-export { validateTimestamp };
+export { validateMeshToken };
 
 function sendJson(res: any, statusCode: number, body: Record<string, unknown>) {
   res.statusCode = statusCode;
@@ -59,7 +40,7 @@ function sendJson(res: any, statusCode: number, body: Record<string, unknown>) {
 const plugin: any = definePluginEntry({
   id: "openclaw-mesh",
   name: "OpenClaw Mesh",
-  description: "Receives Hermes mesh webhooks, verifies HMAC, and injects into the configured agent session",
+  description: "Receives Hermes mesh webhooks, verifies Ed25519 signatures, and injects into the configured agent session",
   register(api: any) {
     const pluginCfg: MeshBridgePluginConfig = resolveEffectivePluginConfig(api);
     setDebugEnabled(pluginCfg.debug === true);
@@ -98,9 +79,9 @@ const plugin: any = definePluginEntry({
         let payload: any;
 
         try {
-          const hubSig = (req.headers["x-hub-signature-256"] as string) || "";
           const meshSig = (req.headers["x-mesh-signature"] as string) || "";
-          if (!hubSig && !meshSig) {
+          const meshTs = (req.headers["x-mesh-timestamp"] as string) || "";
+          if (!meshSig || !meshTs) {
             sendJson(res, 403, { status: "forbidden", reason: "missing-signature" });
             return true;
           }
@@ -147,8 +128,6 @@ const plugin: any = definePluginEntry({
             return true;
           }
 
-          // Per-agent signature: verify with the sender's HMAC secret (file backend)
-          // or Ed25519 public key from the registry.
           const fromName = typeof payload?.from === "string" ? payload.from : envelope.from;
           if (!fromName) {
             sendJson(res, 403, { status: "forbidden", reason: "missing-sender" });
@@ -162,50 +141,19 @@ const plugin: any = definePluginEntry({
             return true;
           }
 
-          if (hubSig) {
-            const sender = resolvePeer(vaultPath, fromName) || resolvePeer(legacyVaultPath, fromName);
-            let senderSecret = sender?.webhook_secret || sender?.transports?.hermes_webhook?.auth?.secret || "";
-            // Fall back to the shared bridge secret for backward compatibility.
-            if (!senderSecret) {
-              try {
-                senderSecret = resolveSecret(api);
-              } catch {
-                // no shared secret either
-              }
-            }
-            if (!senderSecret) {
-              sendJson(res, 403, { status: "forbidden", reason: "unknown-sender" });
-              return true;
-            }
+          const publicKeyResolver = async (name: string): Promise<string | null> => {
+            const sender = resolvePeer(vaultPath, name) || resolvePeer(legacyVaultPath, name);
+            return sender?.transports?.hermes_webhook?.auth?.public_key || null;
+          };
 
-            const timestamp = (req.headers["x-mesh-timestamp"] as string) || undefined;
-            const hmacOk =
-              (timestamp && verifyHmacSignature(hubSig, senderSecret, body, timestamp)) ||
-              verifyHmacSignature(hubSig, senderSecret, body);
-            if (!hmacOk) {
-              logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "hmac", agent: fromName, success: false, error: "invalid-signature" }, extra);
-              sendJson(res, 403, { status: "forbidden", reason: "invalid-signature" });
-              return true;
-            }
-            logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "hmac", agent: fromName, success: true }, extra);
-          } else if (meshSig) {
-            const extra = resolveMeshExtra(api);
-            const isRegistry = getIdentitySource(extra) === "registry";
-            if (!isRegistry) {
-              logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "ed25519", agent: fromName, success: false, error: "ed25519-not-configured" }, extra);
-              sendJson(res, 403, { status: "forbidden", reason: "ed25519-not-configured" });
-              return true;
-            }
-            const ok = await verifyEd25519Signature(req.headers, body, fromName, extra);
-            if (!ok) {
-              logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "ed25519", agent: fromName, success: false, error: "invalid-signature" }, extra);
-              sendJson(res, 403, { status: "forbidden", reason: "invalid-signature" });
-              return true;
-            }
-            logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "ed25519", agent: fromName, success: true }, extra);
+          const ok = await verifyEd25519Signature(req.headers, body, fromName, extra, publicKeyResolver);
+          if (!ok) {
+            logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "ed25519", agent: fromName, success: false, error: "invalid-signature" }, extra);
+            sendJson(res, 403, { status: "forbidden", reason: "invalid-signature" });
+            return true;
           }
+          logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "ed25519", agent: fromName, success: true }, extra);
 
-          // HMAC verified. Enforce that the envelope sender matches the signed payload.
           if (payload?.from && envelope.from !== fromName) {
             try {
               await sendDeliveryError(routingAgent, fromName, envelope.id, "unauthorized", envelope.from, envelope.to, envelope.ref, meshApi);

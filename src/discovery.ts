@@ -2,9 +2,10 @@
  * mesh vault discovery and outbound sending.
  *
  * Reads the shared Hermes/OpenClaw mesh vault (one directory per agent with
- * identity.yaml under mesh/agents) and exposes two tools to the binding agent:
- *  - mesh_list  : list discoverable peers and their transport URLs
- *  - mesh_send  : send a mesh session message to a peer's Hermes webhook with HMAC
+ * identity.yaml under mesh/agents) and exposes mesh tools to the binding agent.
+ * All outbound messages are signed with Ed25519 and verified with the peer's
+ * cached public_key. The mesh-peer-registry is only used for explicit
+ * mesh_sync / mesh_publish calls.
  */
 
 import fs from "node:fs";
@@ -20,7 +21,8 @@ import {
   resolveDeliveryTimeoutMs,
   resolveEffectivePluginConfig,
   resolvePrivateNetworkPolicy,
-  resolveSecret,
+  resolveRoutingAgent,
+  resolveSignTimestamp,
 } from "./config.js";
 import { validateMeshToken } from "./envelope.js";
 import { createDebugLogger } from "./logging.js";
@@ -28,11 +30,11 @@ import { mirrorMessage } from "./mirror.js";
 import { logAudit } from "./audit.js";
 import {
   deregisterPeerOnRegistry,
-  getIdentitySource,
+  getRegistryUrl,
   listPeersFromRegistry,
+  loadOrGenerateKeyPair,
   registerPeerOnRegistry,
   resolveMeshExtra,
-  resolveSenderFromRegistry,
   resolveTargetFromRegistry,
   signMessage,
 } from "./registry.js";
@@ -67,7 +69,6 @@ function hasPathTraversal(name: string): boolean {
   if (!name) return false;
   return name.includes("..") || name.includes(path.sep) || name.includes("/") || name.includes("\\");
 }
-
 
 function expandHome(input: string): string {
   if (input.startsWith("~")) {
@@ -142,12 +143,11 @@ export function normalizeIdentity(raw: any): MeshIdentity {
   const a2aRpc = transports.a2a_rpc && typeof transports.a2a_rpc === "object" ? transports.a2a_rpc : {};
 
   const fallbackWebhookUrl = data.webhook_url || "";
-  const fallbackWebhookSecret = data.webhook_secret || "";
   const fallbackA2aUrl = data.a2a_url || "";
 
   const webhookUrl = hermesWebhook.url || fallbackWebhookUrl;
   const webhookAuth = hermesWebhook.auth && typeof hermesWebhook.auth === "object" ? hermesWebhook.auth : {};
-  const webhookSecret = webhookAuth.secret || fallbackWebhookSecret;
+  const publicKey = webhookAuth.public_key || "";
 
   const a2aUrl = a2aRpc.url || fallbackA2aUrl;
 
@@ -155,7 +155,7 @@ export function normalizeIdentity(raw: any): MeshIdentity {
     transports.hermes_webhook = {
       protocol: hermesWebhook.protocol || "hermes-webhook",
       url: webhookUrl,
-      auth: { type: webhookSecret ? "hmac-sha256" : "none", secret: webhookSecret },
+      auth: { public_key: publicKey },
     };
   }
   if (a2aUrl) {
@@ -168,7 +168,6 @@ export function normalizeIdentity(raw: any): MeshIdentity {
 
   data.transports = transports;
   data.webhook_url = webhookUrl;
-  data.webhook_secret = webhookSecret;
   data.a2a_url = a2aUrl;
 
   // Canonicalize the identity key used for lookup and envelope addressing.
@@ -215,6 +214,7 @@ export function listPeers(vaultPath: string): MeshPeer[] {
       platform: platformNames[0] || "unknown",
       a2a_url: identity.a2a_url || identity.transports?.a2a_rpc?.url || "",
       webhook_url: identity.webhook_url || identity.transports?.hermes_webhook?.url || "",
+      public_key: identity.public_key || identity.transports?.hermes_webhook?.auth?.public_key || "",
       description: identity.description || identity.role || "",
       role: identity.role || "",
     });
@@ -302,20 +302,20 @@ function mapFailureReason(lastError: Error | undefined, status?: number): string
 
 export async function sendToAgent(
   fromName: string,
-  signingMaterial: string,
   peer: MeshIdentity,
   message: string,
   action = "do",
   reply = "yes",
   id?: string,
   api?: any,
-  authType = "hmac-sha256",
   ref?: string,
   isDsn = false,
 ): Promise<{ ok: boolean; status?: number; error?: string; delivery_id?: string; text?: string }> {
   const webhookUrl = peer.webhook_url || peer.transports?.hermes_webhook?.url || "";
   if (!webhookUrl) return { ok: false, error: "peer has no hermes_webhook url" };
 
+  const extra = resolveEffectivePluginConfig(api);
+  const { privatePem } = loadOrGenerateKeyPair(fromName, extra);
   const toName = String(peer.id || peer.name || "unknown").toLowerCase();
   const payload = {
     from: fromName,
@@ -323,16 +323,19 @@ export async function sendToAgent(
   };
   const body = JSON.stringify(payload, Object.keys(payload).sort());
 
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (isDsn) {
-    headers["x-mesh-dsn"] = "1";
-  }
-  if (authType === "ed25519") {
-    headers["x-mesh-timestamp"] = String(Math.floor(Date.now() / 1000));
-    headers["x-mesh-signature"] = signMessage(signingMaterial, body);
-  } else {
-    headers["x-hub-signature-256"] = `sha256=${crypto.createHmac("sha256", signingMaterial).update(body).digest("hex")}`;
-  }
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signTimestamp = resolveSignTimestamp(api);
+  const signedBody = signTimestamp
+    ? `${timestamp}\n${body}`
+    : body;
+  const signature = signMessage(privatePem, Buffer.from(signedBody, "utf-8"));
+
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-mesh-timestamp": timestamp,
+    "x-mesh-signature": signature,
+  };
+  if (isDsn) headers["x-mesh-dsn"] = "1";
 
   const networkPolicy = resolvePrivateNetworkPolicy(api, peer.allow_loopback === true);
   const allowLoopback = networkPolicy === "allow";
@@ -414,50 +417,19 @@ export async function sendDeliveryError(
   if (!dsnEnabled(api)) return;
 
   const extra = resolveMeshExtra(api);
-  const identitySource = getIdentitySource(extra);
   const resolvePath = typeof api.resolvePath === "function" ? api.resolvePath : undefined;
   const vaultPath = resolveMeshVaultPath(extra, resolvePath);
   const legacyVaultPath = resolveLegacyMeshVaultPath(extra, resolvePath);
 
-  let dsnFromPeer: MeshIdentity | null = null;
-  let dsnToPeer: MeshIdentity | null = null;
-  let signingMaterial = "";
-  let authType = "hmac-sha256";
+  let dsnToPeer = resolvePeer(vaultPath, dsnTo) || resolvePeer(legacyVaultPath, dsnTo);
 
-  if (identitySource === "registry") {
+  if (!dsnToPeer && getRegistryUrl(extra)) {
     try {
-      const sender = await resolveSenderFromRegistry(dsnFrom, extra);
-      if (!sender) {
-        debugLog(`sendDeliveryError: sender '${dsnFrom}' has no Ed25519 key in registry`);
-        return;
-      }
-      signingMaterial = sender.material;
-      authType = "ed25519";
-    } catch (e: any) {
-      debugLog(`sendDeliveryError: could not resolve sender from registry: ${e.message || e}`);
-      return;
-    }
-    try {
-      dsnToPeer = await resolveTargetFromRegistry(dsnTo, extra);
+      const peer = await resolveTargetFromRegistry(dsnTo, extra);
+      if (peer) dsnToPeer = peer;
     } catch (e: any) {
       debugLog(`sendDeliveryError: could not resolve target from registry: ${e.message || e}`);
-      return;
     }
-  } else {
-    dsnFromPeer = resolvePeer(vaultPath, dsnFrom) || resolvePeer(legacyVaultPath, dsnFrom);
-    if (!dsnFromPeer) {
-      debugLog(`sendDeliveryError: sender '${dsnFrom}' not found in vault`);
-      return;
-    }
-    const fromTransport = dsnFromPeer.transports?.hermes_webhook || dsnFromPeer.webhook_secret
-      ? { auth: { secret: dsnFromPeer.webhook_secret } }
-      : undefined;
-    signingMaterial = fromTransport?.auth?.secret || dsnFromPeer.webhook_secret || "";
-    if (!signingMaterial) {
-      debugLog(`sendDeliveryError: sender '${dsnFrom}' has no webhook secret`);
-      return;
-    }
-    dsnToPeer = resolvePeer(vaultPath, dsnTo) || resolvePeer(legacyVaultPath, dsnTo);
   }
 
   if (!dsnToPeer) {
@@ -470,7 +442,7 @@ export async function sendDeliveryError(
   const bodyText = `[mesh-dsn][status:failed][reason:${safeReason}] Delivery of message ${originalId} from ${originalFrom} to ${originalTo} failed: ${safeReason}.`;
 
   try {
-    await sendToAgent(dsnFrom, signingMaterial, dsnToPeer, bodyText, "info", "no", dsnId, api, authType, originalId, true);
+    await sendToAgent(dsnFrom, dsnToPeer, bodyText, "info", "no", dsnId, api, originalId, true);
   } catch (e: any) {
     debugLog(`sendDeliveryError: DSN delivery to '${dsnTo}' failed: ${e.message || e}`);
   }
@@ -491,7 +463,6 @@ export function resolveGatewayUrl(api: any): string {
 export function registerAgent(
   vaultPath: string,
   name: string,
-  secret: string,
   baseUrl: string,
   options: {
     description?: string;
@@ -500,10 +471,10 @@ export function registerAgent(
     kind?: string;
     a2a_url?: string;
     webhook_url?: string;
-    webhook_secret?: string;
+    public_key?: string;
     allow_loopback?: boolean;
   } = {},
-): { ok: boolean; path: string; name: string } {
+): { ok: boolean; path: string; name: string; public_key: string } {
   const agentName = normalizeAgentName(name) || "emts";
   if (hasPathTraversal(agentName)) {
     throw new Error(`registerAgent refused: agent name '${name}' contains path traversal`);
@@ -514,7 +485,11 @@ export function registerAgent(
 
   const a2aUrl = options.a2a_url || baseUrl;
   const webhookUrl = options.webhook_url || `${baseUrl}/plugins/openclaw-mesh/webhook`;
-  const webhookSecret = options.webhook_secret || secret;
+
+  const agentBaseName = normalizeAgentName(options.a2a_url ? new URL(a2aUrl).hostname : agentName) || agentName;
+  const { privatePem, publicPem } = options.public_key
+    ? { privatePem: "", publicPem: options.public_key }
+    : loadOrGenerateKeyPair(agentBaseName, options as any);
 
   const identity: any = {
     id: agentName,
@@ -524,28 +499,19 @@ export function registerAgent(
     description: options.description || "OpenClaw mesh peer",
     a2a_url: a2aUrl,
     webhook_url: webhookUrl,
-    webhook_secret: webhookSecret,
     allow_loopback: options.allow_loopback === true,
+    transports: {
+      hermes_webhook: {
+        protocol: "hermes-webhook",
+        url: webhookUrl,
+        auth: { public_key: publicPem },
+      },
+    },
   };
 
   const platform = options.platform || "openclaw";
   if (platform) {
     identity.platforms = { [platform]: {} };
-  }
-
-  if (webhookUrl || webhookSecret) {
-    identity.transports = {
-      hermes_webhook: {
-        protocol: "hermes-webhook",
-        url: webhookUrl,
-        auth: {
-          type: webhookSecret ? "hmac-sha256" : "none",
-          secret: webhookSecret,
-          header: "X-Hub-Signature-256",
-          prefix: "sha256=",
-        },
-      },
-    };
   }
 
   fs.mkdirSync(agentDir, { recursive: true });
@@ -556,7 +522,7 @@ export function registerAgent(
   } catch {
     // Best-effort: ignore filesystems that do not support chmod.
   }
-  return { ok: true, path: yamlPath, name: agentName };
+  return { ok: true, path: yamlPath, name: agentName, public_key: publicPem };
 }
 
 function textResult(text: string): any {
@@ -573,23 +539,14 @@ export function registerMeshTools(api: any) {
   const effectiveCfg = resolveEffectivePluginConfig(api);
   const meshApi = { pluginConfig: effectiveCfg };
   const resolvePath = typeof api.resolvePath === "function" ? api.resolvePath : undefined;
-  const fromName = extra.routingAgent || process.env.MESH_AGENT_NAME || process.env.A2A_AGENT_NAME || "emts";
-  const identitySource = getIdentitySource(extra);
+  const fromName = resolveRoutingAgent(api);
+  const registryUrl = getRegistryUrl(extra);
 
   // Resolve once at registration so users can see which vault path is being used.
   const vaultPath = resolveMeshVaultPath(extra, resolvePath);
   const legacyVaultPath = resolveLegacyMeshVaultPath(extra, resolvePath);
   debugLog(`mesh vault path: ${vaultPath}`);
   debugLog(`legacy mesh vault path: ${legacyVaultPath}`);
-
-  // Secret used for inbound webhook verification; reused as the default webhook_secret
-  // when mesh_register writes this agent's identity.yaml (file backend only).
-  let pluginSecret: string | undefined;
-  try {
-    pluginSecret = resolveSecret(api);
-  } catch (e: any) {
-    debugLog(`mesh_register: no plugin secret available: ${e.message || e}`);
-  }
 
   api.registerTool(
     {
@@ -604,22 +561,13 @@ export function registerMeshTools(api: any) {
         additionalProperties: false,
       },
       execute: async () => {
-        let peers: MeshPeer[];
-        if (identitySource === "registry") {
-          try {
-            peers = await listPeersFromRegistry(extra);
-          } catch (e: any) {
-            return textResult(JSON.stringify({ error: e.message || String(e) }));
-          }
-        } else {
-          peers = [...listPeers(vaultPath), ...listPeers(legacyVaultPath)];
-          const seen = new Set<string>();
-          peers = peers.filter((p) => {
-            if (seen.has(p.name)) return false;
-            seen.add(p.name);
-            return true;
-          });
-        }
+        let peers = [...listPeers(vaultPath), ...listPeers(legacyVaultPath)];
+        const seen = new Set<string>();
+        peers = peers.filter((p) => {
+          if (seen.has(p.name)) return false;
+          seen.add(p.name);
+          return true;
+        });
         return textResult(JSON.stringify({ count: peers.length, peers }, null, 2));
       },
     },
@@ -631,7 +579,7 @@ export function registerMeshTools(api: any) {
       name: "mesh_send",
       label: "Send mesh session message",
       description:
-        "Send a mesh session message to a named peer's Hermes gateway webhook. The message is HMAC-signed with this agent's own webhook secret (per-agent HMAC); the peer's identity in the mesh vault provides the target URL.",
+        "Send a mesh session message to a named peer's Hermes gateway webhook. The message is Ed25519-signed with this agent's private key; the peer's identity in the mesh vault provides the target URL and public key for verification.",
       parameters: {
         type: "object",
         properties: {
@@ -677,27 +625,37 @@ export function registerMeshTools(api: any) {
         if (!agent || typeof agent !== "string") return textResult(JSON.stringify({ error: "'agent' is required" }));
         if (!message || typeof message !== "string") return textResult(JSON.stringify({ error: "'message' is required" }));
 
-        let peer: MeshIdentity | null = null;
-        let signingMaterial: string;
-        let authType = "hmac-sha256";
+        let peer = resolvePeer(vaultPath, agent) || resolvePeer(legacyVaultPath, agent);
 
-        if (identitySource === "registry") {
-          peer = await resolveTargetFromRegistry(agent, extra);
-          if (!peer) return textResult(JSON.stringify({ error: `Agent '${agent}' not found in registry` }));
-          const sender = await resolveSenderFromRegistry(fromName, extra);
-          if (!sender) return textResult(JSON.stringify({ error: `Sender '${fromName}' has no Ed25519 key` }));
-          signingMaterial = sender.material;
-          authType = "ed25519";
-        } else {
-          if (!pluginSecret) {
-            return textResult(JSON.stringify({ error: "mesh_send requires a configured plugin secret to sign outbound messages" }));
+        if (!peer && registryUrl) {
+          try {
+            const regPeer = await resolveTargetFromRegistry(agent, extra);
+            if (regPeer) {
+              const publicKey = regPeer.transports?.hermes_webhook?.auth?.public_key || "";
+              const webhookUrl = regPeer.webhook_url || "";
+              const a2aUrl = regPeer.a2a_url || "";
+              try {
+                registerAgent(vaultPath, regPeer.name || agent, a2aUrl || webhookUrl, {
+                  role: regPeer.role,
+                  description: regPeer.description,
+                  platform: "openclaw",
+                  a2a_url: a2aUrl,
+                  webhook_url: webhookUrl,
+                  public_key: publicKey,
+                });
+                peer = resolvePeer(vaultPath, agent) || resolvePeer(legacyVaultPath, agent);
+              } catch (e: any) {
+                debugLog(`mesh_send: could not cache registry peer '${agent}': ${e.message || e}`);
+              }
+            }
+          } catch (e: any) {
+            debugLog(`mesh_send: could not resolve target from registry: ${e.message || e}`);
           }
-          peer = resolvePeer(vaultPath, agent) || resolvePeer(legacyVaultPath, agent);
-          if (!peer) return textResult(JSON.stringify({ error: `Agent '${agent}' not found in mesh vault` }));
-          signingMaterial = pluginSecret;
         }
 
-        const result = await sendToAgent(fromName, signingMaterial, peer, message, action, reply, envelopeId, meshApi, authType, ref, false);
+        if (!peer) return textResult(JSON.stringify({ error: `Agent '${agent}' not found in mesh vault or registry` }));
+
+        const result = await sendToAgent(fromName, peer, message, action, reply, envelopeId, meshApi, ref, false);
 
         logAudit({
           ts: new Date().toISOString(),
@@ -726,7 +684,7 @@ export function registerMeshTools(api: any) {
       name: "mesh_register",
       label: "Register this agent in the mesh vault",
       description:
-        "Write or update this agent's identity.yaml in the shared mesh vault so peers can discover it with mesh_list and send messages with mesh_send. Safe to call repeatedly; it is idempotent. Usually just call mesh_register() with no arguments; the plugin fills in the gateway URL and secret.",
+        "Write or update this agent's identity.yaml in the shared mesh vault so peers can discover it with mesh_list and send messages with mesh_send. If a mesh-peer-registry URL is configured, also publish the public key. Safe to call repeatedly; it is idempotent.",
       parameters: {
         type: "object",
         properties: {
@@ -755,9 +713,9 @@ export function registerMeshTools(api: any) {
             type: "string",
             description: "Override the webhook URL (defaults to <a2a_url>/plugins/openclaw-mesh/webhook)",
           },
-          webhook_secret: {
+          public_key: {
             type: "string",
-            description: "Override the webhook secret (defaults to the plugin secret; not recommended)",
+            description: "Override the Ed25519 public key (defaults to a generated keypair)",
           },
           allow_loopback: {
             type: "boolean",
@@ -776,47 +734,43 @@ export function registerMeshTools(api: any) {
           platform,
           a2a_url,
           webhook_url,
-          webhook_secret,
+          public_key,
           allow_loopback,
         } = params || {};
         const agentName = String(name || fromName || "emts").trim().toLowerCase();
         if (!agentName) return textResult(JSON.stringify({ error: "'name' is required" }));
 
-        if (identitySource === "registry") {
-          const baseUrl = a2a_url || resolveGatewayUrl(api);
-          const targetUrl = webhook_url || `${baseUrl}/plugins/openclaw-mesh/webhook`;
-          try {
-            await registerPeerOnRegistry(agentName, targetUrl, role || "mesh_peer", description || "", extra);
-            logAudit({ ts: new Date().toISOString(), event: "mesh_register", agent: agentName, target: "registry", success: true }, extra);
-            return textResult(JSON.stringify({ ok: true, name: agentName, source: "registry" }, null, 2));
-          } catch (e: any) {
-            logAudit({ ts: new Date().toISOString(), event: "mesh_register", agent: agentName, target: "registry", success: false, error: e.message || String(e) }, extra);
-            return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
-          }
-        }
-
-        const secret = typeof webhook_secret === "string" && webhook_secret ? webhook_secret : pluginSecret;
-        if (!secret) {
-          return textResult(
-            JSON.stringify({
-              error: "no webhook_secret provided and no plugin secret is configured",
-            }),
-          );
-        }
+        const baseUrl = a2a_url || resolveGatewayUrl(api);
+        const targetUrl = webhook_url || `${baseUrl}/plugins/openclaw-mesh/webhook`;
 
         try {
-          const baseUrl = a2a_url || resolveGatewayUrl(api);
-          const result = registerAgent(vaultPath, agentName, secret, baseUrl, {
+          const result = registerAgent(vaultPath, agentName, baseUrl, {
             description,
             role,
             platform,
             a2a_url,
-            webhook_url,
-            webhook_secret: secret,
+            webhook_url: targetUrl,
+            public_key,
             allow_loopback,
           });
+
+          let registryResult: { ok: boolean } | undefined;
+          if (registryUrl) {
+            try {
+              registryResult = await registerPeerOnRegistry(agentName, targetUrl, role || "mesh_peer", description || "", extra);
+            } catch (e: any) {
+              debugLog(`mesh_register: registry publish failed: ${e.message || e}`);
+            }
+          }
+
           logAudit({ ts: new Date().toISOString(), event: "mesh_register", agent: agentName, target: "file", success: true }, extra);
-          return textResult(JSON.stringify({ ok: true, name: result.name, path: result.path }, null, 2));
+          return textResult(JSON.stringify({
+            ok: true,
+            name: result.name,
+            path: result.path,
+            public_key: result.public_key,
+            registry: registryUrl ? { published: registryResult?.ok ?? false } : undefined,
+          }, null, 2));
         } catch (e: any) {
           logAudit({ ts: new Date().toISOString(), event: "mesh_register", agent: agentName, target: "file", success: false, error: e.message || String(e) }, extra);
           return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
@@ -831,7 +785,7 @@ export function registerMeshTools(api: any) {
       name: "mesh_deregister",
       label: "Deregister this agent from the mesh vault or registry",
       description:
-        "Remove this agent's identity from the local mesh vault or the mesh-peer-registry. This is destructive: by default it returns a dry-run preview and only deletes when force=true. The target path is verified to stay inside the mesh vault.",
+        "Remove this agent's identity from the local mesh vault and, if configured, from the mesh-peer-registry. This is destructive: by default it returns a dry-run preview and only deletes when force=true. The target path is verified to stay inside the mesh vault.",
       parameters: {
         type: "object",
         properties: {
@@ -856,11 +810,10 @@ export function registerMeshTools(api: any) {
           return textResult(JSON.stringify({ ok: false, error: `Agent name '${agentName}' contains path traversal` }));
         }
 
-        if (identitySource === "registry") {
+        if (registryUrl) {
           try {
             await deregisterPeerOnRegistry(agentName, extra);
             logAudit({ ts: new Date().toISOString(), event: "mesh_deregister", agent: agentName, target: "registry", success: true }, extra);
-            return textResult(JSON.stringify({ ok: true, name: agentName, source: "registry" }, null, 2));
           } catch (e: any) {
             logAudit({ ts: new Date().toISOString(), event: "mesh_deregister", agent: agentName, target: "registry", success: false, error: e.message || String(e) }, extra);
             return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
@@ -895,5 +848,109 @@ export function registerMeshTools(api: any) {
       },
     },
     { name: "mesh_deregister" }
+  );
+
+  api.registerTool(
+    {
+      name: "mesh_sync",
+      label: "Sync peer from registry",
+      description: "Fetch a peer (or all peers) from the mesh-peer-registry and write to the local vault.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Peer name to sync; omit to sync all" },
+          registry_url: { type: "string", description: "Optional registry URL override" },
+        },
+        additionalProperties: false,
+      },
+      execute: async (_toolCallId: string, params: any) => {
+        const { name, registry_url } = params || {};
+        const effective = { ...extra };
+        if (registry_url) effective.registryUrl = registry_url;
+        try {
+          if (name) {
+            const peer = await resolveTargetFromRegistry(name, effective);
+            if (!peer) return textResult(JSON.stringify({ error: `peer '${name}' not found in registry` }));
+            const publicKey = peer.transports?.hermes_webhook?.auth?.public_key || "";
+            const webhookUrl = peer.webhook_url || "";
+            const a2aUrl = peer.a2a_url || "";
+            const r = registerAgent(vaultPath, name, a2aUrl || webhookUrl, {
+              role: peer.role,
+              description: peer.description,
+              platform: "openclaw",
+              a2a_url: a2aUrl,
+              webhook_url: webhookUrl,
+              public_key: publicKey,
+            });
+            return textResult(JSON.stringify({ synced: true, name, path: r.path }, null, 2));
+          }
+          const peers = await listPeersFromRegistry(effective);
+          const results: any[] = [];
+          for (const regPeer of peers) {
+            const a2aUrl = regPeer.a2a_url || "";
+            const webhookUrl = regPeer.webhook_url || "";
+            const publicKey = regPeer.public_key || "";
+            try {
+              const r = registerAgent(vaultPath, regPeer.name, a2aUrl || webhookUrl, {
+                role: regPeer.role,
+                description: regPeer.description,
+                platform: "openclaw",
+                a2a_url: a2aUrl,
+                webhook_url: webhookUrl,
+                public_key: publicKey,
+              });
+              results.push({ synced: true, name: regPeer.name, path: r.path });
+            } catch (e: any) {
+              results.push({ synced: false, name: regPeer.name, error: e.message || String(e) });
+            }
+          }
+          return textResult(JSON.stringify({ synced: results.filter((r) => r.synced).length, total: results.length, results }, null, 2));
+        } catch (e: any) {
+          return textResult(JSON.stringify({ error: e.message || String(e) }));
+        }
+      },
+    },
+    { name: "mesh_sync" },
+  );
+
+  api.registerTool(
+    {
+      name: "mesh_publish",
+      label: "Publish this agent to the registry",
+      description: "Publish this agent's webhook URL and Ed25519 public key to the mesh-peer-registry.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Agent name (defaults to routingAgent)" },
+          url: { type: "string", description: "Hermes webhook URL" },
+          role: { type: "string", default: "mesh_peer" },
+          description: { type: "string", default: "" },
+          ttl: { type: "integer", description: "Optional TTL in seconds" },
+          registry_url: { type: "string", description: "Optional registry URL override" },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+      execute: async (_toolCallId: string, params: any) => {
+        const { name, url, role, description, ttl, registry_url } = params || {};
+        const agentName = normalizeAgentName(name) || fromName || "emts";
+        const effective = { ...extra };
+        if (registry_url) effective.registryUrl = registry_url;
+        try {
+          const result = await registerPeerOnRegistry(
+            agentName,
+            url,
+            role || "mesh_peer",
+            description || "",
+            effective,
+            ttl,
+          );
+          return textResult(JSON.stringify({ published: true, name: agentName, url, registry: result }, null, 2));
+        } catch (e: any) {
+          return textResult(JSON.stringify({ published: false, error: e.message || String(e) }));
+        }
+      },
+    },
+    { name: "mesh_publish" },
   );
 }

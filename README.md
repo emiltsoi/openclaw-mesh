@@ -1,16 +1,16 @@
 # openclaw-mesh
 
-Stateful, signed agent-to-agent mesh messaging for OpenClaw. Use it to let one OpenClaw agent send messages to another OpenClaw agent, or to bridge OpenClaw agents to [Hermes](https://github.com/emiltsoi/hermes-mesh) mesh peers. All traffic is carried over the `[mesh]` envelope format with per-agent HMAC-SHA256 or Ed25519 signatures (file vault vs. [mesh-peer-registry](https://github.com/emiltsoi/mesh-peer-registry) mode), durable inbox persistence, and SSRF-protected outbound delivery.
+Stateful, Ed25519-signed agent-to-agent mesh messaging for OpenClaw. Use it to let one OpenClaw agent send messages to another OpenClaw agent, or to bridge OpenClaw agents to [Hermes](https://github.com/emiltsoi/hermes-mesh) mesh peers. All traffic is carried over the `[mesh]` envelope format with Ed25519 signatures, durable inbox persistence, and SSRF-protected outbound delivery.
 
 ## What it does
 
 `openclaw-mesh` turns an OpenClaw agent into a mesh peer:
 
-- **Inbound:** receives a `[mesh]` webhook, verifies the sender's HMAC signature, writes the message to a durable inbox, and triggers an in-process OpenClaw agent turn in the configured session.
-- **Outbound:** exposes the `mesh_send` tool so the agent can HMAC-sign and POST `[mesh]` envelopes to any peer discovered from the shared mesh vault.
-- **Discovery:** exposes `mesh_list` and `mesh_register` so agents can discover each other and register themselves without leaving the chat.
+- **Inbound:** receives a `[mesh]` webhook, verifies the sender's Ed25519 `X-Mesh-Signature`, writes the message to a durable inbox, and triggers an in-process OpenClaw agent turn in the configured session.
+- **Outbound:** exposes the `mesh_send` tool so the agent can Ed25519-sign and POST `[mesh]` envelopes to any peer discovered from the shared mesh vault.
+- **Discovery:** exposes `mesh_list`, `mesh_register`, `mesh_deregister`, `mesh_sync`, and `mesh_publish` so agents can discover, register, and deregister themselves without leaving the chat.
 
-Because both OpenClaw and Hermes agents can share the same mesh vault, envelope format, and HMAC scheme, the plugin works in two modes:
+Because both OpenClaw and Hermes agents can share the same mesh vault and envelope format, the plugin works in two modes:
 
 1. **OpenClaw-only mesh** — two or more OpenClaw agents register in the same vault and send `[mesh]` envelopes to each other.
 2. **Hermes bridge** — OpenClaw agents exchange envelopes with Hermes mesh peers.
@@ -20,19 +20,19 @@ Because both OpenClaw and Hermes agents can share the same mesh vault, envelope 
 ```
 OpenClaw agent A                     OpenClaw agent B (this plugin)
     │ mesh_send(to=B)                    │
-    │  [mesh] envelope + HMAC            │
+    │  [mesh] envelope + Ed25519 sig     │
     └───────────────webhook──────────────▶│
-                                          ├─ verify HMAC against sender's secret
-                                          ├─ write to mesh-inbox.jsonl
-                                          ├─ optional mirror (telegram/cli)
-                                          └─ runEmbeddedAgent(target session)
+                                           ├─ verify Ed25519 against sender's public_key
+                                           ├─ write to mesh-inbox.jsonl
+                                           ├─ optional mirror (telegram/cli)
+                                           └─ runEmbeddedAgent(target session)
 ```
 
 The same flow works when the sender is a Hermes mesh agent.
 
 The plugin:
 
-1. Verifies the inbound `X-Hub-Signature-256` HMAC header using the sender's secret from the mesh vault.
+1. Verifies the inbound `X-Mesh-Signature` and `X-Mesh-Timestamp` headers using the sender's cached `public_key` from the mesh vault (falling back to the optional `mesh-peer-registry`).
 2. Parses and validates the `[mesh][from:...][to:...][id:...][action:...][reply:...]` envelope.
 3. Writes the message to a durable inbox (`/tmp/openclaw-mesh/mesh-inbox.jsonl` by default).
 4. Optionally mirrors the inbound message to `telegram` or `cli`.
@@ -69,7 +69,6 @@ Then enable it in `~/.openclaw/workspaces/<agent>/openclaw-<agent>.json`:
         "enabled": true,
         "config": {
           "routingAgent": "emts",
-          "secretEnvVar": "OPENCLAW_MESH_SECRET",
           "targetSessionKey": "agent:main:main",
           "targetAgentId": "main",
           "sourceChannel": "mesh",
@@ -96,8 +95,6 @@ Restart the OpenClaw gateway after changing source or `openclaw.plugin.json`.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `routingAgent` | `emts` | Mesh agent name this instance accepts messages for. |
-| `secret` | — | HMAC-SHA256 shared secret (prefer `secretEnvVar`). |
-| `secretEnvVar` | `OPENCLAW_MESH_SECRET` | Environment variable holding the secret. |
 | `targetSessionKey` | `agent:main:main` | Target OpenClaw session key. |
 | `targetAgentId` | `main` | Target OpenClaw agent ID. |
 | `sourceChannel` | `mesh` | Channel attributed to the injected turn. |
@@ -113,16 +110,18 @@ Restart the OpenClaw gateway after changing source or `openclaw.plugin.json`.
 | `deliveryRetries` | `3` | Number of outbound webhook delivery attempts. |
 | `deliveryBackoffMs` | `1000` | Initial retry backoff in milliseconds. |
 | `deliveryTimeoutMs` | `15000` | Per-attempt delivery timeout in milliseconds. |
-| `identitySource` | `file` | Where to store and discover mesh identities: `file` (local mesh vault) or `registry` (mesh-peer-registry). |
-| `registryUrl` | — | URL of the mesh-peer-registry server (e.g. `http://127.0.0.1:8646`). Required when `identitySource` is `registry`. |
-| `privateKeyPath` | `~/.mesh/keys/<routingAgent>.pem` | Path to the local Ed25519 private key PEM. Used for registry signing; generated on first use if missing. |
+| `registryUrl` | — | URL of the mesh-peer-registry server (e.g. `https://registry.example.com`). Used by `mesh_sync` and `mesh_publish`. |
+| `privateKeyPath` | `~/.mesh/keys/<routingAgent>.pem` | Path to the Ed25519 private key PEM. Generated on first use if missing. |
+| `signTimestamp` | `true` | Include `X-Mesh-Timestamp` in the signed outbound payload. |
+| `allowInsecureRegistry` | `false` | Allow `http://` registry URLs. Not recommended for production. |
+| `registryPin` | — | SHA-256 hex digest of the registry server certificate SPKI for TLS pinning. |
 | `auditLogPath` | — | Optional JSON-lines audit log file for mesh traffic. Falls back to `OPENCLAW_MESH_AUDIT_LOG`. |
 
-The shared secret is resolved in this order:
+The Ed25519 private key is loaded in this order:
 
-1. `pluginConfig.secret` (not recommended — OpenClaw strips sensitive fields)
-2. `config.plugins.entries["openclaw-mesh"].config.secret`
-3. Environment variable named by `secretEnvVar` (default: `OPENCLAW_MESH_SECRET`)
+1. `pluginConfig.privateKeyPath`
+2. `MESH_PRIVATE_KEY_PATH` environment variable
+3. `~/.mesh/keys/<routingAgent>.pem` (generated on first use)
 
 ## Inbound / Outbound Mirroring
 
@@ -141,7 +140,7 @@ Supported values:
 
 ## Mesh Vault Discovery
 
-The plugin can discover peers from a **file-based mesh vault** (default, `identitySource: "file"`) or from a shared [`mesh-peer-registry`](https://github.com/emiltsoi/mesh-peer-registry) server (`identitySource: "registry"`).
+The plugin can discover peers from a **file-based mesh vault** (default) or from an optional [`mesh-peer-registry`](https://github.com/emiltsoi/mesh-peer-registry) server.
 
 ```
 $OPENCLAW_STATE_DIR/mesh/mesh/agents/
@@ -153,11 +152,14 @@ $OPENCLAW_STATE_DIR/mesh/mesh/agents/
     └── identity.yaml
 ```
 
-Three tools are exposed:
+Five tools are exposed:
 
-- **`mesh_list`** — list discoverable peers with `name`, `platform`, `a2a_url`, and `webhook_url`. No secrets are leaked.
-- **`mesh_send(agent, message, action?, reply?, id?, thread_id?)`** — resolve a peer, HMAC-sign a `{"from": "<routingAgent>", "text": "[mesh][from:...]..."}` payload with the sender's own `webhook_secret`, and POST it to the peer's `hermes_webhook` URL. Use `id` or `thread_id` to preserve the mesh thread id on replies.
-- **`mesh_register(name?, description?, role?, platform?)`** — write or update this agent's `identity.yaml` in the mesh vault so peers can discover it. Defaults are derived from `routingAgent`, the OpenClaw gateway config, and the plugin `secret`.
+- **`mesh_list`** — list discoverable peers with `name`, `platform`, `a2a_url`, `webhook_url`, and `public_key`. No secrets are leaked.
+- **`mesh_send(agent, message, action?, reply?, id?, thread_id?)`** — resolve a peer, Ed25519-sign a `{"from": "<routingAgent>", "text": "[mesh][from:...]..."}` payload with the sender's private key, and POST it to the peer's `hermes_webhook` URL. Use `id` or `thread_id` to preserve the mesh thread id on replies.
+- **`mesh_register(name?, description?, role?, platform?, a2a_url?, webhook_url?, public_key?, allow_loopback?)`** — write or update this agent's `identity.yaml` in the mesh vault so peers can discover it. Defaults are derived from `routingAgent`, the OpenClaw gateway config, and a generated Ed25519 keypair.
+- **`mesh_deregister(name?, force?)`** — remove this agent from the local vault and, if configured, from the mesh-peer-registry.
+- **`mesh_sync(name?, registry_url?)`** — fetch a peer (or all peers) from the mesh-peer-registry and cache it in the local vault.
+- **`mesh_publish(name?, url, role?, description?, ttl?, registry_url?)`** — publish this agent's webhook URL and Ed25519 public key to the mesh-peer-registry.
 
 ### Agent listing
 
@@ -172,6 +174,7 @@ Three tools are exposed:
       "platform": "hermes",
       "a2a_url": "http://127.0.0.1:41808/a2a",
       "webhook_url": "http://127.0.0.1:8645/mesh/receive",
+      "public_key": "-----BEGIN PUBLIC KEY-----\n...",
       "description": "Hermes agent zero",
       "role": "operator"
     },
@@ -180,6 +183,7 @@ Three tools are exposed:
       "platform": "openclaw",
       "a2a_url": "http://127.0.0.1:18860",
       "webhook_url": "http://127.0.0.1:18860/plugins/openclaw-mesh/webhook",
+      "public_key": "-----BEGIN PUBLIC KEY-----\n...",
       "description": "OpenClaw mesh peer",
       "role": "mesh_peer"
     }
@@ -187,7 +191,7 @@ Three tools are exposed:
 }
 ```
 
-`webhook_secret` is never exposed in the listing; it is only used internally when `mesh_send` signs an outbound message.
+Private keys are never exposed in the listing; they are only used internally when `mesh_send` signs an outbound message.
 
 `meshVaultPath` is path-neutral: `~` and relative paths are resolved through OpenClaw's `api.resolvePath` or manual `~` expansion, so you can point the plugin at any vault on any system. It points to the **mesh vault root** (the directory that contains `mesh/agents`), and the plugin appends `mesh/agents` internally.
 
@@ -211,17 +215,13 @@ Then point `openclaw-mesh` at it:
 
 ```json
 {
-  "identitySource": "registry",
-  "registryUrl": "http://127.0.0.1:8646",
-  "privateKeyPath": "~/.mesh/keys/emts.pem"
+  "registryUrl": "https://registry.example.com",
+  "privateKeyPath": "~/.mesh/keys/emts.pem",
+  "registryPin": "sha256-hex-of-server-certificate-spki"
 }
 ```
 
-In registry mode:
-
-- `mesh_list` fetches peers from the registry.
-- `mesh_register` publishes this peer to the registry with an Ed25519 signature.
-- `mesh_send` resolves the target peer's public key and webhook URL from the registry and signs outbound messages with Ed25519; the receiver verifies the sender's public key against the registry.
+The registry is **optional**: the local vault is the runtime source of truth. `mesh_sync` pulls peers from the registry into the vault, and `mesh_publish` pushes this peer's public key and webhook URL to the registry.
 
 The registry is language-agnostic: Hermes peers and OpenClaw peers can share the same `mesh-peer-registry` instance. See the [mesh-peer-registry README](https://github.com/emiltsoi/mesh-peer-registry/blob/main/README.md) for API details.
 
@@ -240,7 +240,7 @@ The plugin fills in:
 - `name` from `routingAgent` (or `MESH_AGENT_NAME`, defaulting to `emts`)
 - `a2a_url` from the OpenClaw gateway config (`http://127.0.0.1:<port>`)
 - `webhook_url` as `<a2a_url>/plugins/openclaw-mesh/webhook`
-- `webhook_secret` from the plugin's configured `secret`
+- `public_key` from a generated or reused Ed25519 keypair at `privateKeyPath`
 
 Optional overrides:
 
@@ -268,20 +268,19 @@ role: mesh_peer
 description: OpenClaw mesh peer
 a2a_url: http://127.0.0.1:18860
 webhook_url: http://127.0.0.1:18860/plugins/openclaw-mesh/webhook
-webhook_secret: <same-secret-as-openclaw-mesh-config>
 allow_loopback: true
 transports:
   hermes_webhook:
     protocol: hermes-webhook
     url: http://127.0.0.1:18860/plugins/openclaw-mesh/webhook
     auth:
-      type: hmac-sha256
-      secret: <same-secret-as-openclaw-mesh-config>
-      header: X-Hub-Signature-256
-      prefix: sha256=
+      public_key: |
+        -----BEGIN PUBLIC KEY-----
+        <sender's-ed25519-public-key>
+        -----END PUBLIC KEY-----
 ```
 
-The `webhook_secret` (and `transports.hermes_webhook.auth.secret`) must match the `secret` configured for `openclaw-mesh` so inbound HMAC signatures verify. Set `allow_loopback: true` when the peer runs on the same host and you want the plugin to allow deliveries to `127.0.0.1`/private addresses.
+Set `allow_loopback: true` when the peer runs on the same host and you want the plugin to allow deliveries to `127.0.0.1`/private addresses.
 
 ## Envelope Format
 
@@ -296,9 +295,11 @@ Messages not addressed to the configured `routingAgent` (or `*`) are silently ig
 ## Security Notes
 
 - **SSRF protection:** outbound deliveries use OpenClaw's `fetchWithSsrFGuard` with per-peer `allow_loopback` and the configurable `allowLoopback` / `privateNetworkPolicy` settings. By default private/loopback targets are rejected. Set `allowLoopback: true` to allow loopback deliveries regardless of the `privateNetworkPolicy` default, or use `privateNetworkPolicy: "allow"` / `"warn"` for more control. As a break-glass, set `OPENCLAW_MESH_ALLOW_LOOPBACK=1`.
-- **Per-agent HMAC:** outbound messages are signed with the sender's own `webhook_secret` from the vault. Inbound messages are verified with the sender's secret. A shared-secret fallback is supported for backward compatibility.
+- **Ed25519 signatures:** outbound messages are signed with the sender's private key. Inbound messages are verified with the sender's cached public key from the mesh vault or the optional mesh-peer-registry.
+- **HMAC removed:** the previous HMAC-SHA256 (`X-Hub-Signature-256`) mode is no longer supported. Existing deployments must re-register agents to generate Ed25519 keys.
+- **Certificate pinning:** when using a registry over HTTPS, set `registryPin` to the SHA-256 hex digest of the server certificate's SPKI, or set `MESH_REGISTRY_PIN`.
 - **Envelope token validation:** `from`, `to`, `id`, `action`, and `reply` fields are validated to keep the header well-formed.
-- **Debug logging:** gated by `config.debug` or `OPENCLAW_MESH_DEBUG`; secrets are redacted from logs.
+- **Debug logging:** gated by `config.debug` or `OPENCLAW_MESH_DEBUG`; private keys and tokens are redacted from logs.
 
 ## Development
 
@@ -318,7 +319,7 @@ CI is configured in `.github/workflows/ci.yml` and runs `typecheck`, `build`, an
 | OpenClaw | openclaw-mesh (this repo) |
 | Shared registry | [mesh-peer-registry](https://github.com/emiltsoi/mesh-peer-registry) / [PyPI](https://pypi.org/project/mesh-peer-registry/) |
 
-Hermes and OpenClaw use the same `[mesh]` envelope format. File-based discovery uses HMAC-SHA256 (`webhook_secret`); registry mode uses Ed25519 signatures via `mesh-peer-registry`.
+Hermes and OpenClaw use the same `[mesh]` envelope format and Ed25519 signatures.
 
 ## License
 

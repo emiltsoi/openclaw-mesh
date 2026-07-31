@@ -1,7 +1,7 @@
 {
   "id": "openclaw-mesh",
   "name": "OpenClaw Mesh",
-  "description": "Stateful, signed agent-to-agent mesh messaging for OpenClaw; also bridges to Hermes mesh peers",
+  "description": "Stateful, Ed25519-signed agent-to-agent mesh messaging for OpenClaw; also bridges to Hermes mesh peers",
   "kind": "plugin",
   "activation": {
     "onStartup": true
@@ -18,7 +18,9 @@
       "mesh_list",
       "mesh_send",
       "mesh_register",
-      "mesh_deregister"
+      "mesh_deregister",
+      "mesh_sync",
+      "mesh_publish"
     ]
   },
   "configSchema": {
@@ -28,15 +30,6 @@
         "type": "string",
         "description": "mesh agent name this bridge accepts messages for",
         "default": "emts"
-      },
-      "secret": {
-        "type": "string",
-        "description": "HMAC-SHA256 shared secret"
-      },
-      "secretEnvVar": {
-        "type": "string",
-        "description": "Env var override",
-        "default": "OPENCLAW_MESH_SECRET"
       },
       "targetSessionKey": {
         "type": "string",
@@ -119,20 +112,28 @@
         "description": "Per-attempt delivery timeout in milliseconds",
         "default": 15000
       },
-      "identitySource": {
-        "type": "string",
-        "enum": ["file", "registry"],
-        "description": "Identity backend: 'file' (default, local mesh vault) or 'registry' (mesh-peer-registry)",
-        "default": "file"
-      },
       "registryUrl": {
         "type": "string",
-        "description": "URL of the mesh-peer-registry server (required when identitySource is 'registry')"
+        "description": "URL of the mesh-peer-registry server (used for mesh_sync and mesh_publish)"
       },
       "privateKeyPath": {
         "type": "string",
-        "description": "Path to the local Ed25519 private key PEM (used when identitySource is 'registry')",
-        "default": "~/.mesh/keys/<agent>.pem"
+        "description": "Path to the Ed25519 private key PEM; defaults to ~/.mesh/keys/<agent>.pem",
+        "default": ""
+      },
+      "signTimestamp": {
+        "type": "boolean",
+        "description": "Include X-Mesh-Timestamp in the signed outbound payload",
+        "default": true
+      },
+      "allowInsecureRegistry": {
+        "type": "boolean",
+        "description": "Allow http:// registry URLs (not recommended for production)",
+        "default": false
+      },
+      "registryPin": {
+        "type": "string",
+        "description": "SHA-256 hex digest of the registry server certificate SPKI for TLS pinning"
       }
     }
   }
