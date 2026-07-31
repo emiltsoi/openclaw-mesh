@@ -25,7 +25,7 @@ export function setDebugEnabled(enabled: boolean): void {
 }
 
 function redactSecrets(msg: string): string {
-  // Redact Telegram bot tokens and long hex-looking HMAC secrets that may
+  // Redact Telegram bot tokens and long hex-looking secrets (e.g., Ed25519 signatures) that may
   // appear in error messages or URLs.
   let out = msg;
   out = out.replace(/bot\d+:[A-Za-z0-9_-]+/g, "***telegram-bot-token***");
