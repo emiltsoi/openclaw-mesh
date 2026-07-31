@@ -2,17 +2,27 @@
  * Bridge between openclaw-mesh and the optional mesh-peer-registry server.
  *
  * All registry / Ed25519 code lives here so the rest of openclaw-mesh can still
- * run without mesh-peer-registry installed (identity_source stays "file").
+ * run without mesh-peer-registry installed.
  */
 import fs from "node:fs";
+import https from "node:https";
+import tls from "node:tls";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import type { MeshBridgePluginConfig, MeshIdentity, MeshPeer } from "./types.js";
 import { createDebugLogger } from "./logging.js";
-import { resolveEffectivePluginConfig } from "./config.js";
+import {
+  getRegistryUrl,
+  resolveAllowInsecureRegistry,
+  resolveEffectivePluginConfig,
+  resolveMeshExtra,
+  resolveRegistryPin,
+} from "./config.js";
 
 const debugLog = createDebugLogger();
+
+export { resolveMeshExtra, getRegistryUrl, resolveEffectivePluginConfig } from "./config.js";
 
 const _peerCache = new Map<string, { data: RegistryPeer | null; expiry: number }>();
 const _listCache = new Map<string, { data: RegistryPeer[]; expiry: number }>();
@@ -63,18 +73,6 @@ function expandHome(input: string): string {
     return input.replace(/^~(?=$|[\\/])/, os.homedir());
   }
   return input;
-}
-
-export function resolveMeshExtra(api: { pluginConfig?: MeshBridgePluginConfig; config?: any }): MeshBridgePluginConfig {
-  return resolveEffectivePluginConfig(api);
-}
-
-export function getIdentitySource(extra?: MeshBridgePluginConfig): string {
-  return (extra?.identitySource || extra?.identity_source || "file").toString().toLowerCase();
-}
-
-export function getRegistryUrl(extra?: MeshBridgePluginConfig): string {
-  return (extra?.registryUrl || extra?.registry_url || "").toString();
 }
 
 export function getPrivateKeyPath(name: string, extra?: MeshBridgePluginConfig): string {
@@ -139,11 +137,51 @@ export function signMessage(privatePem: string, message: Buffer | string): strin
   return crypto.sign(null, data, privateKey).toString("base64");
 }
 
+function _isValidBase64(input: string): boolean {
+  if (typeof input !== "string" || input.length === 0) return false;
+  return /^[A-Za-z0-9+/=]+$/.test(input);
+}
+
 export function verifyMessage(publicPem: string, message: Buffer | string, signatureB64: string): boolean {
   const data = typeof message === "string" ? Buffer.from(message, "utf-8") : message;
-  const publicKey = crypto.createPublicKey(publicPem);
+  if (!_isValidBase64(signatureB64)) return false;
+  let publicKey: crypto.KeyObject;
+  try {
+    publicKey = crypto.createPublicKey(publicPem);
+  } catch {
+    return false;
+  }
   const signature = Buffer.from(signatureB64, "base64");
-  return crypto.verify(null, data, publicKey, signature);
+  if (signature.length !== 64) return false;
+  try {
+    return crypto.verify(null, data, publicKey, signature);
+  } catch {
+    return false;
+  }
+}
+
+function _spkiHashFromCert(derCert: Buffer): string {
+  const cert = new crypto.X509Certificate(derCert);
+  const spki = cert.publicKey.export({ type: "spki", format: "der" }) as Buffer;
+  return crypto.createHash("sha256").update(spki).digest("hex");
+}
+
+function _createPinningAgent(pin: string, allowInsecure: boolean): https.Agent | undefined {
+  if (allowInsecure) return undefined;
+  const pinValue = pin.toLowerCase().trim();
+  if (!pinValue) return undefined;
+
+  return new https.Agent({
+    checkServerIdentity: (hostname, cert) => {
+      if (cert && (cert as any).raw) {
+        const got = _spkiHashFromCert((cert as any).raw);
+        if (got !== pinValue) {
+          return new Error(`certificate pinning failed: expected ${pinValue.slice(0, 16)}..., got ${got.slice(0, 16)}...`);
+        }
+      }
+      return tls.checkServerIdentity(hostname, cert);
+    },
+  });
 }
 
 export function createRegistryClient(
@@ -152,11 +190,20 @@ export function createRegistryClient(
 ): RegistryClient {
   const registryUrl = getRegistryUrl(extra);
   if (!registryUrl) {
-    throw new Error("registryUrl is required for identity_source=registry");
+    throw new Error("registryUrl is required for registry operations");
   }
+
+  const urlLower = registryUrl.toLowerCase();
+  const allowInsecure = resolveAllowInsecureRegistry(extra) || urlLower.startsWith("http://");
+  if (urlLower.startsWith("http://") && !allowInsecure) {
+    throw new Error("insecure http registry URL; set MESH_REGISTRY_ALLOW_INSECURE=1 or allowInsecureRegistry=true");
+  }
+
   const baseUrl = registryUrl.replace(/\/$/, "");
   const { privatePem, publicPem } = loadOrGenerateKeyPair(agentName, extra);
   const privateKey = crypto.createPrivateKey(privatePem);
+  const pin = resolveRegistryPin(extra);
+  const httpsAgent = _createPinningAgent(pin, urlLower.startsWith("http://") || !pin);
 
   async function signedFetch(
     method: string,
@@ -169,13 +216,20 @@ export function createRegistryClient(
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (sig) headers["x-mesh-signature"] = sig;
 
-    const res = await fetch(url, {
+    const init: any = {
       method,
       headers,
       body,
       signal: AbortSignal.timeout(10_000),
-    });
-    return res;
+    };
+    if (httpsAgent) init.dispatcher = httpsAgent;
+
+    return fetch(url, init);
+  }
+
+  async function plainFetch(url: string, init: any = {}): Promise<Response> {
+    if (httpsAgent) init.dispatcher = httpsAgent;
+    return fetch(url, init);
   }
 
   return {
@@ -201,12 +255,14 @@ export function createRegistryClient(
       const body = canonicalizeJson(payload);
       const url = `${baseUrl}/peers/${encodeURIComponent(name)}`;
       const sig = crypto.sign(null, Buffer.from(body, "utf-8"), privateKey).toString("base64");
-      const res = await fetch(url, {
+      const init: any = {
         method: "DELETE",
         headers: { "content-type": "application/json", "x-mesh-signature": sig },
         body,
         signal: AbortSignal.timeout(10_000),
-      });
+      };
+      if (httpsAgent) init.dispatcher = httpsAgent;
+      const res = await fetch(url, init);
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`registry deregister failed: HTTP ${res.status}: ${text.slice(0, 200)}`);
@@ -221,14 +277,14 @@ export function createRegistryClient(
         debugLog(`listPeers: cache hit for ${baseUrl}`);
         return cached;
       }
-      const res = await fetch(`${baseUrl}/peers`, {
+      const res = await plainFetch(`${baseUrl}/peers`, {
         method: "GET",
         signal: AbortSignal.timeout(10_000),
       });
       if (!res.ok) return [];
       const json: any = await res.json();
       if (!Array.isArray(json)) return [];
-      const peers = json.map((p) => ({
+      const peers = json.map((p: any) => ({
         name: p.name || "",
         url: p.url || "",
         public_key: p.public_key || "",
@@ -246,7 +302,7 @@ export function createRegistryClient(
         debugLog(`getPeer: cache hit for ${name}`);
         return cached;
       }
-      const res = await fetch(`${baseUrl}/peers/${encodeURIComponent(name)}`, {
+      const res = await plainFetch(`${baseUrl}/peers/${encodeURIComponent(name)}`, {
         method: "GET",
         signal: AbortSignal.timeout(10_000),
       });
@@ -286,11 +342,12 @@ export async function resolveTargetFromRegistry(
     description: peer.description,
     role: peer.role,
     webhook_url: peer.url,
+    a2a_url: peer.url,
     transports: {
       hermes_webhook: {
         protocol: "hermes-webhook",
         url: peer.url,
-        auth: { type: "ed25519", public_key: peer.public_key },
+        auth: { public_key: peer.public_key },
       },
     },
   };
@@ -313,6 +370,7 @@ export async function listPeersFromRegistry(extra?: MeshBridgePluginConfig): Pro
     platform: "unknown",
     a2a_url: p.url,
     webhook_url: p.url,
+    public_key: p.public_key,
     description: p.description,
     role: p.role,
   }));
@@ -324,10 +382,11 @@ export async function registerPeerOnRegistry(
   role: string,
   description: string,
   extra?: MeshBridgePluginConfig,
+  ttl?: number,
 ): Promise<{ ok: boolean }> {
   const agentName = process.env.MESH_AGENT_NAME || process.env.A2A_AGENT_NAME || "emts";
   const client = createRegistryClient(agentName, extra);
-  return client.register(name, url, role, description);
+  return client.register(name, url, role, description, ttl);
 }
 
 export async function deregisterPeerOnRegistry(
@@ -344,6 +403,7 @@ export async function verifyEd25519Signature(
   body: Buffer,
   fromName: string,
   extra?: MeshBridgePluginConfig,
+  getPublicKey?: (name: string) => string | null | Promise<string | null>,
 ): Promise<boolean> {
   const timestampStr = headers["x-mesh-timestamp"];
   const sig = headers["x-mesh-signature"];
@@ -355,13 +415,24 @@ export async function verifyEd25519Signature(
     return false;
   }
 
-  const registryUrl = getRegistryUrl(extra);
-  if (!registryUrl) return false;
+  let publicPem = "";
+  if (getPublicKey) {
+    const resolved = await getPublicKey(fromName);
+    if (resolved) publicPem = resolved;
+  }
 
-  const agentName = process.env.MESH_AGENT_NAME || process.env.A2A_AGENT_NAME || "emts";
-  const client = createRegistryClient(agentName, extra);
-  const peer = await client.getPeer(fromName);
-  if (!peer) return false;
+  if (!publicPem) {
+    const registryUrl = getRegistryUrl(extra);
+    if (!registryUrl) return false;
+    const client = createRegistryClient(process.env.MESH_AGENT_NAME || process.env.A2A_AGENT_NAME || "emts", extra);
+    const peer = await client.getPeer(fromName);
+    if (!peer) return false;
+    publicPem = peer.public_key;
+  }
 
-  return verifyMessage(peer.public_key, body, sig);
+  if (!publicPem) return false;
+
+  const timestamped = Buffer.concat([Buffer.from(`${timestampStr}\n`, "utf-8"), body]);
+  if (verifyMessage(publicPem, timestamped, sig)) return true;
+  return verifyMessage(publicPem, body, sig);
 }

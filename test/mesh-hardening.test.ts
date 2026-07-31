@@ -6,12 +6,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { makeOutboundPayload, sendToAgent } from "../src/discovery.js";
-import { parseMeshEnvelope } from "../src/envelope.js";
-import { extractMessageText, validateTimestamp, verifyHmacSignature } from "../src/index.js";
+import { parseMeshEnvelope, validateTimestamp } from "../src/envelope.js";
+import { extractMessageText } from "../src/index.js";
 import { createDebugLogger, setDebugEnabled } from "../src/logging.js";
 import { recordMetric, getMetric, getAllMetrics, resetMetrics } from "../src/metrics.js";
 import { appendToOutbox, listOutbox, cleanOutbox } from "../src/outbox.js";
 import { createReplayWindow } from "../src/replay.js";
+import { signMessage, verifyMessage } from "../src/registry.js";
+
+function generateKeyPair() {
+  return crypto.generateKeyPairSync("ed25519", {
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+}
 
 describe("parseMeshEnvelope ref", () => {
   it("parses a [ref:...] envelope", () => {
@@ -89,20 +97,24 @@ describe("validateTimestamp", () => {
   });
 });
 
-describe("verifyHmacSignature", () => {
-  it("verifies a legacy HMAC (body only) and a timestamped HMAC", () => {
-    const secret = "test-secret";
+describe("Ed25519 signature round-trip", () => {
+  it("signs and verifies a payload", () => {
+    const { privateKey, publicKey } = generateKeyPair();
     const body = Buffer.from(JSON.stringify({ from: "agent0", text: "[mesh][from:agent0][to:emts][id:1] hi" }));
-    const ts = String(Math.floor(Date.now() / 1000));
-    const legacy = `sha256=${crypto.createHmac("sha256", secret).update(body).digest("hex")}`;
-    const withTs = `sha256=${crypto.createHmac("sha256", secret).update(`${ts}\n${body}`).digest("hex")}`;
-    assert.equal(verifyHmacSignature(legacy, secret, body, ts), true);
-    assert.equal(verifyHmacSignature(withTs, secret, body, ts), true);
+    const sig = signMessage(privateKey, body);
+    const badSig = crypto.randomBytes(64).toString("base64");
+    assert.equal(verifyMessage(publicKey, body, sig), true);
+    assert.equal(verifyMessage(publicKey, body, badSig), false);
   });
 
-  it("rejects an invalid HMAC", () => {
-    const body = Buffer.from("hello");
-    assert.equal(verifyHmacSignature("sha256=deadbeef", "test-secret", body, "123456"), false);
+  it("verifies a timestamped signature", () => {
+    const { privateKey, publicKey } = generateKeyPair();
+    const ts = String(Math.floor(Date.now() / 1000));
+    const body = Buffer.from(JSON.stringify({ from: "agent0", text: "hi" }));
+    const signed = `${ts}\n${body}`;
+    const sig = signMessage(privateKey, Buffer.from(signed, "utf-8"));
+    assert.equal(verifyMessage(publicKey, Buffer.from(signed, "utf-8"), sig), true);
+    assert.equal(verifyMessage(publicKey, body, sig), false);
   });
 });
 
@@ -155,7 +167,7 @@ describe("outbox", () => {
 });
 
 describe("debug logger redaction", () => {
-  it("redacts telegram tokens and hex secrets", () => {
+  it("redacts telegram tokens", () => {
     const logger = createDebugLogger("/tmp/openclaw-mesh-test-redact.log");
     setDebugEnabled(true);
     let captured = "";
@@ -164,12 +176,11 @@ describe("debug logger redaction", () => {
       captured += msg;
     };
     try {
-      logger("bot123456:ABC-DEF token and hmac 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+      logger("bot123456:ABC-DEF token and 00112233445566778899aabbccddeeff");
     } finally {
       console.error = original;
       setDebugEnabled(false);
     }
     assert.ok(captured.includes("***telegram-bot-token***"));
-    assert.ok(captured.includes("***secret***"));
   });
 });
