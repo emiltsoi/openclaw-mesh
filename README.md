@@ -109,6 +109,7 @@ Restart the OpenClaw gateway after changing source or `openclaw.plugin.json`.
 | `mirrorOutbound` | `none` | Where to mirror outbound mesh messages: `none`, `telegram`, or `cli`. |
 | `debug` | `false` | Emit verbose debug logs to stderr and `/tmp/openclaw-mesh-debug.log`. |
 | `allowLoopback` | `false` | Allow outbound webhook deliveries to loopback/private addresses. |
+| `privateNetworkPolicy` | `deny` | Override for private network handling. Set to `allow`, `warn`, or `deny`. If `allowLoopback` is `true`, loopback deliveries are allowed regardless of this value. |
 | `deliveryRetries` | `3` | Number of outbound webhook delivery attempts. |
 | `deliveryBackoffMs` | `1000` | Initial retry backoff in milliseconds. |
 | `deliveryTimeoutMs` | `15000` | Per-attempt delivery timeout in milliseconds. |
@@ -263,7 +264,7 @@ Messages not addressed to the configured `routingAgent` (or `*`) are silently ig
 
 ## Security Notes
 
-- **SSRF protection:** outbound deliveries use OpenClaw's `fetchWithSsrFGuard` with per-peer `allow_loopback` and configurable `allowLoopback` policy. By default private/loopback targets are rejected.
+- **SSRF protection:** outbound deliveries use OpenClaw's `fetchWithSsrFGuard` with per-peer `allow_loopback` and the configurable `allowLoopback` / `privateNetworkPolicy` settings. By default private/loopback targets are rejected. Set `allowLoopback: true` to allow loopback deliveries regardless of the `privateNetworkPolicy` default, or use `privateNetworkPolicy: "allow"` / `"warn"` for more control. As a break-glass, set `OPENCLAW_MESH_ALLOW_LOOPBACK=1`.
 - **Per-agent HMAC:** outbound messages are signed with the sender's own `webhook_secret` from the vault. Inbound messages are verified with the sender's secret. A shared-secret fallback is supported for backward compatibility.
 - **Envelope token validation:** `from`, `to`, `id`, `action`, and `reply` fields are validated to keep the header well-formed.
 - **Debug logging:** gated by `config.debug` or `OPENCLAW_MESH_DEBUG`; secrets are redacted from logs.

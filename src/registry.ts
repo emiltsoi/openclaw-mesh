@@ -10,6 +10,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import type { MeshBridgePluginConfig, MeshIdentity, MeshPeer } from "./types.js";
 import { createDebugLogger } from "./logging.js";
+import { resolveEffectivePluginConfig } from "./config.js";
 
 const debugLog = createDebugLogger();
 
@@ -65,9 +66,7 @@ function expandHome(input: string): string {
 }
 
 export function resolveMeshExtra(api: { pluginConfig?: MeshBridgePluginConfig; config?: any }): MeshBridgePluginConfig {
-  const pluginCfg = api?.pluginConfig || {};
-  const fullCfg = api?.config?.plugins?.entries?.["openclaw-mesh"]?.config ?? {};
-  return { ...fullCfg, ...pluginCfg };
+  return resolveEffectivePluginConfig(api);
 }
 
 export function getIdentitySource(extra?: MeshBridgePluginConfig): string {

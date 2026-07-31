@@ -29,7 +29,7 @@ function redactSecrets(msg: string): string {
   // appear in error messages or URLs.
   let out = msg;
   out = out.replace(/bot\d+:[A-Za-z0-9_-]+/g, "***telegram-bot-token***");
-  out = out.replace(/[a-f0-9]{64}/gi, "***hmac-secret***");
+  out = out.replace(/[a-f0-9]{64}/gi, "***secret***");
   return out;
 }
 

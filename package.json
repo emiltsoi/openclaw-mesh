@@ -1,6 +1,6 @@
 {
   "name": "@emiltsoi/openclaw-mesh",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "author": "emiltsoi",
   "type": "module",
   "main": "./dist/index.js",

@@ -1,15 +1,16 @@
 import crypto from "node:crypto";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-targets";
-import { resolveSecret } from "./config.js";
+import { resolveEffectivePluginConfig, resolveSecret } from "./config.js";
 import { logAudit } from "./audit.js";
 import {
   registerMeshTools,
   resolveMeshVaultPath,
   resolveLegacyMeshVaultPath,
   resolvePeer,
+  sendDeliveryError,
 } from "./discovery.js";
-import { parseMeshEnvelope, validateMeshToken } from "./envelope.js";
+import { parseMeshEnvelope, validateMeshToken, validateTimestamp } from "./envelope.js";
 import { injectIntoSession } from "./injector.js";
 import { createDebugLogger, setDebugEnabled } from "./logging.js";
 import { resolveMeshExtra, getIdentitySource, verifyEd25519Signature } from "./registry.js";
@@ -17,22 +18,38 @@ import type { MeshBridgePluginConfig } from "./types.js";
 
 const debugLog = createDebugLogger();
 
-function extractMessageText(payload: any): string {
+export function extractMessageText(payload: any): string {
   if (typeof payload.text === "string") return payload.text;
   if (payload?.envelope) {
     const e = payload.envelope;
-    return `[mesh][v:1][from:${e.from || ""}][to:${e.to || ""}][id:${e.id || ""}][action:${e.action || "do"}][reply:${e.reply || "no"}] ${payload.message || ""}`;
+    let header = `[mesh][from:${e.from || ""}][to:${e.to || ""}][id:${e.id || ""}][action:${e.action || "do"}][reply:${e.reply || "no"}]`;
+    if (e.ref) {
+      header += `[ref:${e.ref}]`;
+    }
+    return `${header} ${payload.message || ""}`;
   }
   return "";
 }
 
-function verifyHmacSignature(sigHeader: string, secret: string, body: Buffer): boolean {
+export function verifyHmacSignature(sigHeader: string, secret: string, body: Buffer, timestamp?: string): boolean {
   const expected = sigHeader.startsWith("sha256=") ? sigHeader.slice(7) : sigHeader;
-  const computed = crypto.createHmac("sha256", secret).update(body).digest("hex");
-  const computedBuf = Buffer.from(computed);
   const expectedBuf = Buffer.from(expected);
-  return computedBuf.length === expectedBuf.length && crypto.timingSafeEqual(computedBuf, expectedBuf);
+
+  function check(computed: string): boolean {
+    const computedBuf = Buffer.from(computed);
+    return computedBuf.length === expectedBuf.length && crypto.timingSafeEqual(computedBuf, expectedBuf);
+  }
+
+  // Try timestamped HMAC first, then legacy body-only HMAC for backward compatibility.
+  if (timestamp !== undefined) {
+    const withTs = crypto.createHmac("sha256", secret).update(`${timestamp}\n`).update(body).digest("hex");
+    if (check(withTs)) return true;
+  }
+  const legacy = crypto.createHmac("sha256", secret).update(body).digest("hex");
+  return check(legacy);
 }
+
+export { validateTimestamp };
 
 function sendJson(res: any, statusCode: number, body: Record<string, unknown>) {
   res.statusCode = statusCode;
@@ -44,8 +61,9 @@ const plugin: any = definePluginEntry({
   name: "OpenClaw Mesh",
   description: "Receives Hermes mesh webhooks, verifies HMAC, and injects into the configured agent session",
   register(api: any) {
-    const pluginCfg: MeshBridgePluginConfig = api.pluginConfig || {};
+    const pluginCfg: MeshBridgePluginConfig = resolveEffectivePluginConfig(api);
     setDebugEnabled(pluginCfg.debug === true);
+    const meshApi = { pluginConfig: pluginCfg, resolvePath: typeof api.resolvePath === "function" ? api.resolvePath : undefined };
     const isFullMode = api.registrationMode === "full";
     debugLog("register called");
     debugLog(`registrationMode = ${api.registrationMode ?? "<unset>"}`);
@@ -77,6 +95,7 @@ const plugin: any = definePluginEntry({
         const chunks: Buffer[] = [];
         for await (const chunk of req) chunks.push(chunk);
         const body = Buffer.concat(chunks);
+        let payload: any;
 
         try {
           const hubSig = (req.headers["x-hub-signature-256"] as string) || "";
@@ -86,7 +105,6 @@ const plugin: any = definePluginEntry({
             return true;
           }
 
-          let payload: any;
           try {
             payload = JSON.parse(body.toString("utf-8"));
           } catch {
@@ -98,6 +116,13 @@ const plugin: any = definePluginEntry({
           const envelope = parseMeshEnvelope(text);
           if (!envelope) {
             sendJson(res, 200, { status: "ok", note: "ignored-non-envelope" });
+            return true;
+          }
+
+          // DSN loop guard: do not inject a DSN back into the agent, and do not
+          // generate further DSNs for a DSN.
+          if (envelope.dsn || (req.headers["x-mesh-dsn"] === "1")) {
+            sendJson(res, 200, { status: "ok", note: "ignored-dsn" });
             return true;
           }
 
@@ -113,6 +138,11 @@ const plugin: any = definePluginEntry({
 
           const routingAgent = pluginCfg.routingAgent || "emts";
           if (envelope.to !== routingAgent && envelope.to !== "*") {
+            try {
+              await sendDeliveryError(routingAgent, envelope.from, envelope.id, "not-found", envelope.from, envelope.to, envelope.ref, meshApi);
+            } catch (e: any) {
+              debugLog(`webhook: DSN for not-found failed: ${e.message || e}`);
+            }
             sendJson(res, 200, { status: "ok", note: "not-addressed-to-me" });
             return true;
           }
@@ -148,7 +178,11 @@ const plugin: any = definePluginEntry({
               return true;
             }
 
-            if (!verifyHmacSignature(hubSig, senderSecret, body)) {
+            const timestamp = (req.headers["x-mesh-timestamp"] as string) || undefined;
+            const hmacOk =
+              (timestamp && verifyHmacSignature(hubSig, senderSecret, body, timestamp)) ||
+              verifyHmacSignature(hubSig, senderSecret, body);
+            if (!hmacOk) {
               logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "hmac", agent: fromName, success: false, error: "invalid-signature" }, extra);
               sendJson(res, 403, { status: "forbidden", reason: "invalid-signature" });
               return true;
@@ -173,6 +207,11 @@ const plugin: any = definePluginEntry({
 
           // HMAC verified. Enforce that the envelope sender matches the signed payload.
           if (payload?.from && envelope.from !== fromName) {
+            try {
+              await sendDeliveryError(routingAgent, fromName, envelope.id, "unauthorized", envelope.from, envelope.to, envelope.ref, meshApi);
+            } catch (e: any) {
+              debugLog(`webhook: DSN for sender-mismatch failed: ${e.message || e}`);
+            }
             sendJson(res, 401, { status: "unauthorized", reason: "envelope-sender-mismatch" });
             return true;
           }
@@ -185,6 +224,16 @@ const plugin: any = definePluginEntry({
           return true;
         } catch (e: any) {
           debugLog(`handler error: ${e.message || e}`);
+          try {
+            const text = extractMessageText(payload);
+            const envelope = parseMeshEnvelope(text);
+            if (envelope && !envelope.dsn) {
+              const routingAgent = pluginCfg.routingAgent || "emts";
+              await sendDeliveryError(routingAgent, envelope.from, envelope.id, "internal-error", envelope.from, envelope.to, envelope.ref, meshApi);
+            }
+          } catch (dsnErr: any) {
+            debugLog(`handler error: DSN failed: ${dsnErr.message || dsnErr}`);
+          }
           sendJson(res, 500, { status: "error", message: e.message });
           return true;
         }

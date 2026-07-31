@@ -74,6 +74,21 @@ describe("parseMeshEnvelope", () => {
     assert.equal(env?.action, "info");
     assert.equal(env?.reply, "no");
   });
+
+  it("parses ref", () => {
+    const env = parseMeshEnvelope("[mesh][from:agent0][to:emts][id:123][action:do][reply:yes][ref:parent-456] Hello");
+    assert.equal(env?.ref, "parent-456");
+  });
+
+  it("drops an invalid ref", () => {
+    const env = parseMeshEnvelope("[mesh][from:agent0][to:emts][id:123][ref:bad ref!] Hello");
+    assert.equal(env?.ref, undefined);
+  });
+
+  it("marks DSN messages", () => {
+    const env = parseMeshEnvelope("[mesh][from:agent0][to:emts][id:123][action:info][reply:no] [mesh-dsn][status:failed][reason:unreachable] Delivery failed.");
+    assert.equal(env?.dsn, true);
+  });
 });
 
 describe("stripEnvelope", () => {
@@ -299,6 +314,12 @@ describe("makeOutboundPayload", () => {
     const payload = makeOutboundPayload("emts", "agent0", "ping");
     assert.ok(payload.startsWith("[mesh][v:1][from:emts][to:agent0]"));
     assert.ok(payload.includes("[action:do][reply:yes] ping"));
+  });
+
+  it("includes a ref for replies", () => {
+    const payload = makeOutboundPayload("emts", "agent0", "pong", "info", "no", "child-789", "parent-456");
+    assert.ok(payload.includes("[id:child-789]"));
+    assert.ok(payload.includes("[ref:parent-456]"));
   });
 });
 
