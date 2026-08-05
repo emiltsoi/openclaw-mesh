@@ -4,7 +4,7 @@ export interface MeshEnvelope {
   to: string;
   id: string;
   action: "do" | "info";
-  reply: "yes" | "no";
+  reply: "yes" | "no" | "end";
   ref?: string;
   dsn?: boolean;
 }
@@ -59,7 +59,7 @@ export function parseMeshEnvelope(text: string): MeshEnvelope | null {
         if (value === "do" || value === "info") envelope.action = value;
         break;
       case "reply":
-        if (value === "yes" || value === "no") envelope.reply = value;
+        if (value === "yes" || value === "no" || value === "end") envelope.reply = value;
         break;
       case "ref":
         try {
