@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write   # OIDC — npm trusted publishing (no NPM_TOKEN, no expiry, no secret)
     steps:
       - uses: actions/checkout@v7
 
@@ -34,14 +35,16 @@ jobs:
         run: npm test
 
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "NPM_TOKEN secret is not set; skipping npm publish."
+          # Trusted publishing (OIDC) — no token. Requires npm-side mapping on npmjs.com
+          # (package Settings → Access → Trusted publishing → emiltsoi/openclaw-mesh, publish.yml).
+          # Idempotency: skip when this version is already published (re-dispatch safe).
+          VER="$(node -p "require('./package.json').version")"
+          if npm view "@emiltsoi/openclaw-mesh@${VER}" version >/dev/null 2>&1; then
+            echo "openclaw-mesh@${VER} already on npm; skipping."
             exit 0
           fi
-          npm publish --access public
+          npm publish --provenance --access public
 
       - name: Publish to ClawHub
         env:
