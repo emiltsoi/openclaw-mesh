@@ -287,10 +287,12 @@ Set `allow_loopback: true` when the peer runs on the same host and you want the 
 The `[mesh]` envelope is shared with `hermes-mesh`:
 
 ```
-[mesh][from:<sender>][to:<recipient>][id:<uuid>][action:do|info][reply:yes|no] <message>
+[mesh][from:<sender>][to:<recipient>][id:<uuid>][action:do|info][reply:yes|no|end] <message>
 ```
 
 Messages not addressed to the configured `routingAgent` (or `*`) are silently ignored. Brackets inside the message body are preserved when the envelope header is stripped.
+
+**Terminal replies (`reply=end`):** the bridge accepts and forwards `reply=end`. Terminal-thread enforcement (`THREAD_CLOSED`) and ref requirements are enforced by hermes-mesh: `end` marks a message as terminal and no reply is expected; hermes-mesh expects replies to a terminal message to carry `ref=<anchor>`.
 
 ## Security Notes
 

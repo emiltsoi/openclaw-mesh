@@ -599,8 +599,8 @@ export function registerMeshTools(api: any) {
           },
           reply: {
             type: "string",
-            enum: ["yes", "no"],
-            description: "Whether the sender expects a reply. For replies, match the incoming message's reply value.",
+            enum: ["yes", "no", "end"],
+            description: "Whether the sender expects a reply: yes (a reply is expected), no (no reply expected, thread stays open), or end (terminal reply — no reply expected; hermes-mesh expects replies to a terminal message to carry ref=<anchor>). For replies, match the incoming message's reply value.",
             default: "yes",
           },
           id: {

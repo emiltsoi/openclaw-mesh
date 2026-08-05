@@ -1,5 +1,5 @@
 /// <reference types="node" />
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -173,21 +173,28 @@ function setupVault() {
 }
 
 describe("resolveMeshVaultPath", () => {
-  it("defaults to /tmp/openclaw-mesh/mesh/agents when no overrides are set", () => {
-    const origHermes = process.env.HERMES_HOME;
-    const origState = process.env.OPENCLAW_STATE_DIR;
-    const origVault = process.env.MESH_VAULT_PATH;
-    delete process.env.MESH_VAULT_PATH;
-    delete process.env.HERMES_HOME;
-    delete process.env.OPENCLAW_STATE_DIR;
-    try {
-      const expected = path.join("/tmp/openclaw-mesh", "mesh", "agents");
-      assert.equal(resolveMeshVaultPath(), expected);
-    } finally {
-      if (origHermes) process.env.HERMES_HOME = origHermes;
-      if (origState) process.env.OPENCLAW_STATE_DIR = origState;
-      if (origVault) process.env.MESH_VAULT_PATH = origVault;
+  // Isolate the mesh env vars so ambient HERMES_HOME / MESH_VAULT_PATH /
+  // A2A_VAULT_PATH values from the surrounding shell cannot leak into these tests.
+  const MESH_ENV_KEYS = ["MESH_VAULT_PATH", "A2A_VAULT_PATH", "HERMES_HOME", "OPENCLAW_STATE_DIR"];
+  const savedEnv = new Map<string, string | undefined>();
+  beforeEach(() => {
+    savedEnv.clear();
+    for (const key of MESH_ENV_KEYS) {
+      savedEnv.set(key, process.env[key]);
+      delete process.env[key];
     }
+  });
+  afterEach(() => {
+    for (const key of MESH_ENV_KEYS) {
+      const value = savedEnv.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it("defaults to /tmp/openclaw-mesh/mesh/agents when no overrides are set", () => {
+    const expected = path.join("/tmp/openclaw-mesh", "mesh", "agents");
+    assert.equal(resolveMeshVaultPath(), expected);
   });
 
   it("uses $OPENCLAW_STATE_DIR/mesh when set", () => {
