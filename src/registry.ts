@@ -12,6 +12,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import type { MeshBridgePluginConfig, MeshIdentity, MeshPeer } from "./types.js";
 import { createDebugLogger } from "./logging.js";
+import { validateMeshToken } from "./envelope.js";
 import {
   getRegistryUrl,
   resolveAllowInsecureRegistry,
@@ -80,6 +81,13 @@ export function getPrivateKeyPath(name: string, extra?: MeshBridgePluginConfig):
   if (configured) {
     return path.resolve(expandHome(configured.toString()));
   }
+  // U17: sanitize the name before interpolating it into a filesystem path
+  // (`../` and separators would escape the key directory). The token regex
+  // rejects path separators and other hostile characters.
+  if (!name || typeof name !== "string") {
+    throw new Error(`Invalid key name: ${JSON.stringify(name)}`);
+  }
+  validateMeshToken(name, "key name");
   return path.resolve(expandHome("~/.mesh/keys"), `${name}.pem`);
 }
 
@@ -194,7 +202,9 @@ export function createRegistryClient(
   }
 
   const urlLower = registryUrl.toLowerCase();
-  const allowInsecure = resolveAllowInsecureRegistry(extra) || urlLower.startsWith("http://");
+  // U7: the allowInsecure guard is reachable again — http:// registry URLs are
+  // refused unless the operator explicitly opts in.
+  const allowInsecure = resolveAllowInsecureRegistry(extra);
   if (urlLower.startsWith("http://") && !allowInsecure) {
     throw new Error("insecure http registry URL; set MESH_REGISTRY_ALLOW_INSECURE=1 or allowInsecureRegistry=true");
   }
@@ -203,7 +213,7 @@ export function createRegistryClient(
   const { privatePem, publicPem } = loadOrGenerateKeyPair(agentName, extra);
   const privateKey = crypto.createPrivateKey(privatePem);
   const pin = resolveRegistryPin(extra);
-  const httpsAgent = _createPinningAgent(pin, urlLower.startsWith("http://") || !pin);
+  const httpsAgent = _createPinningAgent(pin, allowInsecure || !pin);
 
   async function signedFetch(
     method: string,
@@ -432,7 +442,11 @@ export async function verifyEd25519Signature(
 
   if (!publicPem) return false;
 
+  // U12: require a timestamp-covered signature. The body-only fallback
+  // accepted an unauthenticated timestamp (an attacker could replay the same
+  // body with a fresh ts). COMPAT NOTE: legacy peers with signTimestamp:false
+  // must migrate to signing `"<ts>\n<body>"` — we own both ends, so the
+  // fallback is dropped rather than kept.
   const timestamped = Buffer.concat([Buffer.from(`${timestampStr}\n`, "utf-8"), body]);
-  if (verifyMessage(publicPem, timestamped, sig)) return true;
-  return verifyMessage(publicPem, body, sig);
+  return verifyMessage(publicPem, timestamped, sig);
 }

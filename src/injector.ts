@@ -51,7 +51,13 @@ export async function injectIntoSession(
   validateMeshToken(envelope.reply, "reply");
 
   const sanitize = (s: string) => s.replace(/[\[\]]/g, "");
-  const text = `[mesh][from:${sanitize(envelope.from)}][to:${sanitize(envelope.to)}][id:${sanitize(envelope.id)}][action:${sanitize(envelope.action)}][reply:${sanitize(envelope.reply)}] ${messageText}`;
+  // U10: rebuild the header with [v:1] and carry [ref:...] when present so the
+  // inbox/prompt preserves the reply reference.
+  let header = `[mesh][v:1][from:${sanitize(envelope.from)}][to:${sanitize(envelope.to)}][id:${sanitize(envelope.id)}][action:${sanitize(envelope.action)}][reply:${sanitize(envelope.reply)}]`;
+  if (envelope.ref) {
+    header += `[ref:${sanitize(envelope.ref)}]`;
+  }
+  const text = `${header} ${messageText}`;
 
   const targetSessionKey = pluginCfg.targetSessionKey || "agent:main:main";
   const targetAgentId =
@@ -60,13 +66,16 @@ export async function injectIntoSession(
     "main";
   const sessionId = resolveSessionIdFromKey(targetSessionKey);
 
-  // Step 1: Write to inbox for durability (belt-and-suspenders)
+  // Step 1: Write to inbox for durability (belt-and-suspenders).
+  // U16: an unwritable inbox is LOUD — throw so the webhook returns non-200
+  // instead of silently succeeding with no durable record.
   const inboxDir = pluginCfg.inboxPath || DEFAULT_INBOX;
   try {
     fs.appendFileSync(inboxDir, JSON.stringify({ ts: Date.now(), text, sessionKey: targetSessionKey }) + "\n");
     debugLog("inbox written");
   } catch (e: any) {
     debugLog(`inbox write failed: ${e.message || e}`);
+    throw new Error(`inbox write failed: ${e.message || e}`);
   }
 
   // Step 2: Surface the incoming mesh on the configured mirror platform (if any)

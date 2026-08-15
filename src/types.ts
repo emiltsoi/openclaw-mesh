@@ -29,6 +29,8 @@ export interface MeshBridgePluginConfig {
   /** Private network policy for outbound delivery: "allow", "warn", or "deny". */
   privateNetworkPolicy?: "allow" | "warn" | "deny";
   private_network_policy?: "allow" | "warn" | "deny";
+  /** Optional durable outbox directory for failed deliveries (defaults to $OPENCLAW_MESH_OUTBOX_DIR or a workspace path). */
+  outboxDir?: string;
   /** Optional path to the audit log (JSON lines). */
   auditLogPath?: string;
   audit_log_path?: string;

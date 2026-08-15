@@ -30,6 +30,14 @@ export function validateMeshToken(value: string, field = "token"): string {
 export function parseMeshEnvelope(text: string): MeshEnvelope | null {
   if (!text.startsWith("[mesh]")) return null;
 
+  // U1 (parse-scope confinement): envelope fields are parsed from the
+  // `stripEnvelope` header match ONLY. The body is never scanned for
+  // [key:value] tokens, so a hostile body cannot override header fields
+  // (reply downgrade, spoofed from/to/id/ref).
+  const headerMatch = ENVELOPE_HEADER_RE.exec(text);
+  if (!headerMatch) return null;
+  const header = headerMatch[0];
+
   const envelope: MeshEnvelope = {
     from: "unknown",
     to: "emts",
@@ -38,8 +46,9 @@ export function parseMeshEnvelope(text: string): MeshEnvelope | null {
     reply: "no",
   };
 
+  FIELD_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
-  while ((match = FIELD_RE.exec(text)) !== null) {
+  while ((match = FIELD_RE.exec(header)) !== null) {
     const [, key, rawValue] = match;
     const value = rawValue.trim();
     switch (key) {
@@ -62,17 +71,14 @@ export function parseMeshEnvelope(text: string): MeshEnvelope | null {
         if (value === "yes" || value === "no" || value === "end") envelope.reply = value;
         break;
       case "ref":
-        try {
-          envelope.ref = validateMeshToken(value, "ref");
-        } catch {
-          // Drop an invalid ref instead of failing the whole message.
-          envelope.ref = undefined;
-        }
+        // U5: invalid ref is LOUD — throw so the caller can reject with a 400
+        // instead of silently dropping it.
+        envelope.ref = validateMeshToken(value, "ref");
         break;
     }
   }
 
-  const body = stripEnvelope(text);
+  const body = text.slice(header.length).trimStart();
   if (body.startsWith("[mesh-dsn]")) {
     envelope.dsn = true;
   }

@@ -28,6 +28,7 @@ import { validateMeshToken } from "./envelope.js";
 import { createDebugLogger } from "./logging.js";
 import { mirrorMessage } from "./mirror.js";
 import { logAudit } from "./audit.js";
+import { appendToOutbox, resolveOutboxDir } from "./outbox.js";
 import {
   deregisterPeerOnRegistry,
   getRegistryUrl,
@@ -48,11 +49,35 @@ function safeKey(value: any): string {
     .replace(/^[._-]+|[._-]+$/g, "");
 }
 
+// U3: realpath-based vault confinement. Resolves both the target and the vault
+// through symlinks (resolving the nearest existing ancestor for not-yet-written
+// paths) so a symlink inside the vault pointing outside is rejected for both
+// read and write. Equivalent to the spec's "lstat-reject symlinks in vault path
+// components (or resolve-then-check)" option — resolve-then-check is used.
+function realpathResolve(p: string): string {
+  const resolved = path.resolve(p);
+  const suffix: string[] = [];
+  let probe = resolved;
+  while (!fs.existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) break;
+    suffix.unshift(path.basename(probe));
+    probe = parent;
+  }
+  let realBase: string;
+  try {
+    realBase = fs.realpathSync(probe);
+  } catch {
+    realBase = probe;
+  }
+  return path.join(realBase, ...suffix);
+}
+
 function isPathWithinVault(targetPath: string, vaultPath: string): boolean {
-  const resolvedTarget = path.resolve(targetPath);
-  const resolvedVault = path.resolve(vaultPath);
-  const prefix = `${resolvedVault}${path.sep}`;
-  return resolvedTarget === resolvedVault || resolvedTarget.startsWith(prefix);
+  const realTarget = realpathResolve(targetPath);
+  const realVault = realpathResolve(vaultPath);
+  const prefix = `${realVault}${path.sep}`;
+  return realTarget === realVault || realTarget.startsWith(prefix);
 }
 
 function throwIfOutsideVault(targetPath: string, vaultPath: string, operation: string): void {
@@ -63,6 +88,25 @@ function throwIfOutsideVault(targetPath: string, vaultPath: string, operation: s
 
 function normalizeAgentName(name: any): string {
   return String(name || "").trim().toLowerCase();
+}
+
+// U4 + U20: shared name validation for registration/vault-path use.
+// Rejects empty names (no `|| "emts"` default — the bridge's own identity is
+// the trust anchor and must never be overwritten by an empty name), names with
+// '.' (e.g. "." writes to the vault root) or whitespace, and anything that is
+// not a safe mesh token.
+function validateRegisterName(name: any): string {
+  const agentName = normalizeAgentName(name);
+  if (!agentName) {
+    throw new Error("agent name must not be empty");
+  }
+  if (/[.\s]/.test(agentName)) {
+    throw new Error(
+      `Invalid agent name: ${JSON.stringify(agentName)}. Must not contain '.' or whitespace`
+    );
+  }
+  validateMeshToken(agentName, "agent name");
+  return agentName;
 }
 
 function hasPathTraversal(name: string): boolean {
@@ -201,6 +245,8 @@ export function listPeers(vaultPath: string): MeshPeer[] {
   const seen = new Set<string>();
   for (const entry of fs.readdirSync(vaultPath)) {
     const dir = path.join(vaultPath, entry);
+    // U3: skip entries that resolve outside the vault (symlink escape).
+    if (!isPathWithinVault(dir, vaultPath)) continue;
     if (!fs.statSync(dir).isDirectory()) continue;
     const identity = loadIdentity(path.join(dir, "identity.yaml"));
     if (!identity) continue;
@@ -227,17 +273,22 @@ export function resolvePeer(vaultPath: string, name: string): MeshIdentity | nul
   const key = name.toLowerCase();
   if (hasPathTraversal(key)) return null;
   const directPath = path.join(vaultPath, key, "identity.yaml");
-  throwIfOutsideVault(path.dirname(directPath), vaultPath, "resolvePeer");
+  // U3: read refused when the path resolves outside the vault.
+  if (!isPathWithinVault(path.dirname(directPath), vaultPath)) return null;
   const identity = loadIdentity(directPath);
   if (identity) return identity;
   for (const entry of fs.readdirSync(vaultPath)) {
     const dir = path.join(vaultPath, entry);
+    if (!isPathWithinVault(dir, vaultPath)) continue;
     if (!fs.statSync(dir).isDirectory()) continue;
     const candidate = loadIdentity(path.join(dir, "identity.yaml"));
     if (candidate && (String(candidate.id || entry).toLowerCase() === key || String(candidate.name || entry).toLowerCase() === key)) return candidate;
   }
   return null;
 }
+
+const OUTBOUND_ACTIONS = new Set(["do", "info"]);
+const OUTBOUND_REPLIES = new Set(["yes", "no", "end"]);
 
 export function makeOutboundPayload(
   fromName: string,
@@ -248,16 +299,24 @@ export function makeOutboundPayload(
   id?: string,
   ref?: string,
 ): string {
+  // U11: validate enum values and use validateMeshToken's trimmed return for
+  // from/to. Invalid action/reply/ref throw instead of silently interpolating
+  // an arbitrary value or dropping the ref.
+  const trimmedFrom = validateMeshToken(fromName, "from");
+  const trimmedTo = validateMeshToken(toName, "to");
+  const trimmedAction = String(action ?? "do").trim();
+  const trimmedReply = String(reply ?? "yes").trim();
+  if (!OUTBOUND_ACTIONS.has(trimmedAction)) {
+    throw new Error(`Invalid action: ${JSON.stringify(trimmedAction)}. Allowed: do, info`);
+  }
+  if (!OUTBOUND_REPLIES.has(trimmedReply)) {
+    throw new Error(`Invalid reply: ${JSON.stringify(trimmedReply)}. Allowed: yes, no, end`);
+  }
   const envelopeId = id && typeof id === "string" && id.trim() ? validateMeshToken(id, "envelope id") : `mesh-${crypto.randomUUID()}`;
-  validateMeshToken(fromName, "from");
-  validateMeshToken(toName, "to");
-  let header = `[mesh][v:1][from:${fromName}][to:${toName}][id:${envelopeId}][action:${action}][reply:${reply}]`;
+  let header = `[mesh][v:1][from:${trimmedFrom}][to:${trimmedTo}][id:${envelopeId}][action:${trimmedAction}][reply:${trimmedReply}]`;
   if (ref && typeof ref === "string" && ref.trim()) {
-    try {
-      header += `[ref:${validateMeshToken(ref, "ref")}]`;
-    } catch {
-      // drop an invalid ref rather than failing the whole send
-    }
+    // U5: loud — never silently drop an invalid ref.
+    header += `[ref:${validateMeshToken(ref, "ref")}]`;
   }
   return `${header} ${message}`;
 }
@@ -317,10 +376,17 @@ export async function sendToAgent(
   const extra = resolveEffectivePluginConfig(api);
   const { privatePem } = loadOrGenerateKeyPair(fromName, extra);
   const toName = String(peer.id || peer.name || "unknown").toLowerCase();
-  const payload = {
-    from: fromName,
-    text: makeOutboundPayload(fromName, toName, message, action, reply, id, ref),
-  };
+
+  let payload: { from: string; text: string };
+  try {
+    payload = {
+      from: fromName,
+      text: makeOutboundPayload(fromName, toName, message, action, reply, id, ref),
+    };
+  } catch (e: any) {
+    // U5/U11: invalid ref/action/reply → loud failure, never ok:true.
+    return { ok: false, error: e.message || String(e) };
+  }
   const body = JSON.stringify(payload, Object.keys(payload).sort());
 
   const timestamp = String(Math.floor(Date.now() / 1000));
@@ -338,9 +404,11 @@ export async function sendToAgent(
   if (isDsn) headers["x-mesh-dsn"] = "1";
 
   const networkPolicy = resolvePrivateNetworkPolicy(api, peer.allow_loopback === true);
-  const allowLoopback = networkPolicy === "allow";
+  // U14: "warn" means warn — allow the delivery AND log it (it previously
+  // behaved as deny).
+  const allowLoopback = networkPolicy === "allow" || networkPolicy === "warn";
   if (networkPolicy === "warn") {
-    debugLog(`sendToAgent: private network policy is "warn"; will block and log for ${webhookUrl}`);
+    debugLog(`sendToAgent: private network policy is "warn"; allowing and logging for ${webhookUrl}`);
   }
   const policy = ssrfPolicyFromDangerouslyAllowPrivateNetwork(allowLoopback) ?? undefined;
   const retries = resolveDeliveryRetries(api);
@@ -391,10 +459,24 @@ export async function sendToAgent(
     }
   }
 
+  // U9: write failed sends to the durable outbox (env/config-overridable dir).
+  const outboxDir = resolveOutboxDir(extra);
+  appendToOutbox({
+    direction: "send",
+    ts: Date.now(),
+    peer: toName,
+    text: payload.text,
+    error: lastError?.message || String(lastError),
+    status: statusFromError(lastError),
+    attempts: retries,
+  }, outboxDir);
+
   const reason = mapFailureReason(lastError, statusFromError(lastError));
   if (!isDsn && dsnEnabled(api)) {
     try {
-      const dsnTo = ref ? toName : fromName;
+      // U13: the DSN always goes to the bridge's own agent (the sender that
+      // initiated this delivery), never to the intended recipient.
+      const dsnTo = fromName;
       const envelopeId = id && typeof id === "string" ? id : `mesh-${crypto.randomUUID()}`;
       await sendDeliveryError(fromName, dsnTo, envelopeId, reason, fromName, toName, ref, api);
     } catch (e: any) {
@@ -475,9 +557,19 @@ export function registerAgent(
     allow_loopback?: boolean;
   } = {},
 ): { ok: boolean; path: string; name: string; public_key: string } {
-  const agentName = normalizeAgentName(name) || "emts";
+  // U4: empty name → throw (never default to "emts" — the bridge's own
+  // identity.yaml is the trust anchor and must not be overwritten).
+  // U20: also validate the name token (no '.', no spaces) and key format.
+  const agentName = validateRegisterName(name);
   if (hasPathTraversal(agentName)) {
     throw new Error(`registerAgent refused: agent name '${name}' contains path traversal`);
+  }
+  if (options.public_key) {
+    try {
+      crypto.createPublicKey(options.public_key);
+    } catch {
+      throw new Error("registerAgent refused: invalid public_key");
+    }
   }
   const agentDir = path.join(vaultPath, agentName);
   throwIfOutsideVault(agentDir, vaultPath, "registerAgent");
@@ -527,6 +619,19 @@ export function registerAgent(
 
 function textResult(text: string): any {
   return { content: [{ type: "text", text }], details: { result: text } };
+}
+
+// Resolve the agent name for the register/deregister/publish tools.
+// When the caller omits `name` entirely, fall back to the routing agent
+// (documented default). When `name` is provided but empty/whitespace/invalid,
+// fail loudly — never silently default to "emts" (U4).
+function resolveToolAgentName(name: any, fromName: string): string {
+  if (name === undefined || name === null) {
+    const fallback = String(fromName || "").trim().toLowerCase();
+    if (!fallback) throw new Error("'name' is required");
+    return fallback;
+  }
+  return validateRegisterName(name);
 }
 
 export function registerMeshTools(api: any) {
@@ -737,8 +842,12 @@ export function registerMeshTools(api: any) {
           public_key,
           allow_loopback,
         } = params || {};
-        const agentName = String(name || fromName || "emts").trim().toLowerCase();
-        if (!agentName) return textResult(JSON.stringify({ error: "'name' is required" }));
+        let agentName: string;
+        try {
+          agentName = resolveToolAgentName(name, fromName);
+        } catch (e: any) {
+          return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
+        }
 
         const baseUrl = a2a_url || resolveGatewayUrl(api);
         const targetUrl = webhook_url || `${baseUrl}/plugins/openclaw-mesh/webhook`;
@@ -804,20 +913,11 @@ export function registerMeshTools(api: any) {
       },
       execute: async (_toolCallId: string, params: any) => {
         const { name, force } = params || {};
-        const agentName = normalizeAgentName(name) || fromName || "emts";
-        if (!agentName) return textResult(JSON.stringify({ error: "'name' is required" }));
-        if (hasPathTraversal(agentName)) {
-          return textResult(JSON.stringify({ ok: false, error: `Agent name '${agentName}' contains path traversal` }));
-        }
-
-        if (registryUrl) {
-          try {
-            await deregisterPeerOnRegistry(agentName, extra);
-            logAudit({ ts: new Date().toISOString(), event: "mesh_deregister", agent: agentName, target: "registry", success: true }, extra);
-          } catch (e: any) {
-            logAudit({ ts: new Date().toISOString(), event: "mesh_deregister", agent: agentName, target: "registry", success: false, error: e.message || String(e) }, extra);
-            return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
-          }
+        let agentName: string;
+        try {
+          agentName = resolveToolAgentName(name, fromName);
+        } catch (e: any) {
+          return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
         }
 
         const agentDir = path.join(vaultPath, agentName);
@@ -827,6 +927,8 @@ export function registerMeshTools(api: any) {
         if (!fs.existsSync(agentDir)) {
           return textResult(JSON.stringify({ ok: false, error: `Agent '${agentName}' not found in mesh vault` }));
         }
+        // U8: force check FIRST. A dry-run must be completely non-destructive —
+        // no registry deletion, no vault deletion.
         if (force !== true) {
           return textResult(JSON.stringify({
             ok: false,
@@ -836,6 +938,15 @@ export function registerMeshTools(api: any) {
             path: agentDir,
             hint: "Set force=true to perform the deletion.",
           }, null, 2));
+        }
+        if (registryUrl) {
+          try {
+            await deregisterPeerOnRegistry(agentName, extra);
+            logAudit({ ts: new Date().toISOString(), event: "mesh_deregister", agent: agentName, target: "registry", success: true }, extra);
+          } catch (e: any) {
+            logAudit({ ts: new Date().toISOString(), event: "mesh_deregister", agent: agentName, target: "registry", success: false, error: e.message || String(e) }, extra);
+            return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
+          }
         }
         try {
           fs.rmSync(agentDir, { recursive: true, force: true });
@@ -933,7 +1044,12 @@ export function registerMeshTools(api: any) {
       },
       execute: async (_toolCallId: string, params: any) => {
         const { name, url, role, description, ttl, registry_url } = params || {};
-        const agentName = normalizeAgentName(name) || fromName || "emts";
+        let agentName: string;
+        try {
+          agentName = resolveToolAgentName(name, fromName);
+        } catch (e: any) {
+          return textResult(JSON.stringify({ ok: false, error: e.message || String(e) }));
+        }
         const effective = { ...extra };
         if (registry_url) effective.registryUrl = registry_url;
         try {
