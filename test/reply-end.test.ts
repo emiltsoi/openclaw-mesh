@@ -57,7 +57,7 @@ describe("inbound terminal reply", () => {
       assert.equal(lines.length, 1, "exactly one inbox record delivered");
       const record = JSON.parse(lines[0]);
       assert.equal(record.sessionKey, "agent:main:main");
-      assert.ok(record.text.startsWith("[mesh][from:agent0][to:emts]"));
+      assert.ok(record.text.startsWith("[mesh][v:1][from:agent0][to:emts]"), `inbox text carries v:1: ${record.text}`);
       assert.ok(record.text.includes("[reply:end]"), `inbox text preserves reply=end: ${record.text}`);
     } finally {
       fs.rmSync(inboxDir, { recursive: true, force: true });

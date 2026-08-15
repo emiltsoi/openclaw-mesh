@@ -113,6 +113,12 @@ Restart the OpenClaw gateway after changing source or `openclaw.plugin.json`.
 | `registryUrl` | — | URL of the mesh-peer-registry server (e.g. `https://registry.example.com`). Used by `mesh_sync` and `mesh_publish`. |
 | `privateKeyPath` | `~/.mesh/keys/<routingAgent>.pem` | Path to the Ed25519 private key PEM. Generated on first use if missing. |
 | `signTimestamp` | `true` | Include `X-Mesh-Timestamp` in the signed outbound payload. |
+
+> **Migration note (v0.2.2):** timestamp-covered signatures are now **required** on
+> inbound verification. The body-only signature fallback was removed (U12), so any
+> legacy peer with `signTimestamp: false` must migrate to signing `"<ts>\n<body>"`
+> (the `X-Mesh-Timestamp` header value followed by a newline, then the exact request
+> body). We own both ends of the mesh, so the fallback was dropped rather than kept.
 | `allowInsecureRegistry` | `false` | Allow `http://` registry URLs. Not recommended for production. |
 | `registryPin` | — | SHA-256 hex digest of the registry server certificate SPKI for TLS pinning. |
 | `auditLogPath` | — | Optional JSON-lines audit log file for mesh traffic. Falls back to `OPENCLAW_MESH_AUDIT_LOG`. |

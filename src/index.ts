@@ -1,6 +1,7 @@
+import crypto from "node:crypto";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-targets";
-import { resolveEffectivePluginConfig, resolveMeshExtra } from "./config.js";
+import { resolveEffectivePluginConfig, resolveMeshExtra, resolveRoutingAgent } from "./config.js";
 import { logAudit } from "./audit.js";
 import {
   registerMeshTools,
@@ -13,11 +14,13 @@ import { parseMeshEnvelope, validateMeshToken } from "./envelope.js";
 import { injectIntoSession } from "./injector.js";
 import { createDebugLogger, setDebugEnabled } from "./logging.js";
 import { verifyEd25519Signature } from "./registry.js";
+import { createReplayWindow } from "./replay.js";
 import type { MeshBridgePluginConfig } from "./types.js";
 
 const debugLog = createDebugLogger();
 
 export function extractMessageText(payload: any): string {
+  if (payload === null || payload === undefined || typeof payload !== "object") return "";
   if (typeof payload.text === "string") return payload.text;
   if (payload?.envelope) {
     const e = payload.envelope;
@@ -63,6 +66,13 @@ const plugin: any = definePluginEntry({
     const vaultPath = resolveMeshVaultPath(pluginCfg, resolvePath);
     const legacyVaultPath = resolveLegacyMeshVaultPath(pluginCfg, resolvePath);
 
+    // U6: wire replay protection into the webhook path. Created once per
+    // registration so tests get a fresh window and production gets one
+    // process-lifetime window. Replay key pinned below (see handler):
+    //   envelope.id from the PARSED header (made trustworthy by U1's parse
+    //   scope fix); fallback for a missing id is the signed-body SHA-256.
+    const replayWindow = createReplayWindow();
+
     registerPluginHttpRoute({
       path: "/plugins/openclaw-mesh/webhook",
       auth: "plugin",
@@ -93,8 +103,22 @@ const plugin: any = definePluginEntry({
             return true;
           }
 
+          // U19: a JSON null/array/primitive body is a clean 400, not a 500.
+          if (payload === null || payload === undefined || typeof payload !== "object" || Array.isArray(payload)) {
+            sendJson(res, 400, { status: "bad-request", reason: "invalid-payload" });
+            return true;
+          }
+
           const text = extractMessageText(payload);
-          const envelope = parseMeshEnvelope(text);
+
+          // U1/U5: invalid ref in the header is LOUD — 400 with reason.
+          let envelope;
+          try {
+            envelope = parseMeshEnvelope(text);
+          } catch (e: any) {
+            sendJson(res, 400, { status: "bad-request", reason: "invalid-envelope", message: e.message });
+            return true;
+          }
           if (!envelope) {
             sendJson(res, 200, { status: "ok", note: "ignored-non-envelope" });
             return true;
@@ -117,17 +141,6 @@ const plugin: any = definePluginEntry({
             return true;
           }
 
-          const routingAgent = pluginCfg.routingAgent || "emts";
-          if (envelope.to !== routingAgent && envelope.to !== "*") {
-            try {
-              await sendDeliveryError(routingAgent, envelope.from, envelope.id, "not-found", envelope.from, envelope.to, envelope.ref, meshApi);
-            } catch (e: any) {
-              debugLog(`webhook: DSN for not-found failed: ${e.message || e}`);
-            }
-            sendJson(res, 200, { status: "ok", note: "not-addressed-to-me" });
-            return true;
-          }
-
           const fromName = typeof payload?.from === "string" ? payload.from : envelope.from;
           if (!fromName) {
             sendJson(res, 403, { status: "forbidden", reason: "missing-sender" });
@@ -146,6 +159,9 @@ const plugin: any = definePluginEntry({
             return sender?.transports?.hermes_webhook?.auth?.public_key || null;
           };
 
+          // U2: verify the Ed25519 signature BEFORE any sendDeliveryError path.
+          // This closes the unauthenticated DSN oracle: an unsigned/forged
+          // webhook is rejected with 403 and never triggers a DSN side-effect.
           const ok = await verifyEd25519Signature(req.headers, body, fromName, extra, publicKeyResolver);
           if (!ok) {
             logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "ed25519", agent: fromName, success: false, error: "invalid-signature" }, extra);
@@ -153,6 +169,32 @@ const plugin: any = definePluginEntry({
             return true;
           }
           logAudit({ ts: new Date().toISOString(), event: "webhook_verify", source: "ed25519", agent: fromName, success: true }, extra);
+
+          // U6: replay protection — verify-signature → check replay window →
+          // record → process. Key is the parsed-header envelope.id (trustworthy
+          // after U1); fallback for a missing id is the signed-body SHA-256.
+          const replayKey = envelope.id && envelope.id !== "unknown"
+            ? `id:${envelope.id}`
+            : `body:${crypto.createHash("sha256").update(body).digest("hex")}`;
+          if (replayWindow.has(replayKey)) {
+            logAudit({ ts: new Date().toISOString(), event: "webhook_receive", agent: fromName, target: envelope.to, success: false, error: "replay-detected" }, extra);
+            sendJson(res, 409, { status: "rejected", reason: "replay-detected" });
+            return true;
+          }
+          replayWindow.add(replayKey);
+
+          // U15: use the SAME routing-agent resolver as outbound signing
+          // (routingAgent → MESH_AGENT_NAME → A2A_AGENT_NAME → "emts").
+          const routingAgent = resolveRoutingAgent(api);
+          if (envelope.to !== routingAgent && envelope.to !== "*") {
+            try {
+              await sendDeliveryError(routingAgent, envelope.from, envelope.id, "not-found", envelope.from, envelope.to, envelope.ref, meshApi);
+            } catch (e: any) {
+              debugLog(`webhook: DSN for not-found failed: ${e.message || e}`);
+            }
+            sendJson(res, 200, { status: "ok", note: "not-addressed-to-me" });
+            return true;
+          }
 
           if (payload?.from && envelope.from !== fromName) {
             try {
@@ -176,7 +218,7 @@ const plugin: any = definePluginEntry({
             const text = extractMessageText(payload);
             const envelope = parseMeshEnvelope(text);
             if (envelope && !envelope.dsn) {
-              const routingAgent = pluginCfg.routingAgent || "emts";
+              const routingAgent = resolveRoutingAgent(api);
               await sendDeliveryError(routingAgent, envelope.from, envelope.id, "internal-error", envelope.from, envelope.to, envelope.ref, meshApi);
             }
           } catch (dsnErr: any) {

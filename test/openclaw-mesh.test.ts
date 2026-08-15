@@ -63,9 +63,11 @@ describe("parseMeshEnvelope", () => {
     assert.equal(env?.ref, "parent-456");
   });
 
-  it("drops an invalid ref", () => {
-    const env = parseMeshEnvelope("[mesh][from:agent0][to:emts][id:123][ref:bad ref!] Hello");
-    assert.equal(env?.ref, undefined);
+  it("rejects an invalid ref loudly (U5)", () => {
+    assert.throws(
+      () => parseMeshEnvelope("[mesh][from:agent0][to:emts][id:123][ref:bad ref!] Hello"),
+      /Invalid ref/
+    );
   });
 
   it("marks DSN messages", () => {
