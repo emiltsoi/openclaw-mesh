@@ -35,9 +35,15 @@ jobs:
         run: npm test
 
       - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          # Trusted publishing (OIDC) — no token. Requires npm-side mapping on npmjs.com
-          # (package Settings → Access → Trusted publishing → emiltsoi/openclaw-mesh, publish.yml).
+          # Token-lane publish (2026-08-15): NPM_TOKEN restored after OIDC trusted
+          # publishing returned persistent E404 (mapping verified correct on npmjs
+          # side — org/repo/workflow/permissions all match; see follow-up ticket).
+          # NODE_AUTH_TOKEN wins over the OIDC exchange when present (deterministic).
+          # OIDC path (752c520) remains the end-state; id-token: write kept for
+          # --provenance signing (sigstore uses the GitHub OIDC env, not the token).
           # Idempotency: skip when this version is already published (re-dispatch safe).
           VER="$(node -p "require('./package.json').version")"
           if npm view "@emiltsoi/openclaw-mesh@${VER}" version >/dev/null 2>&1; then
