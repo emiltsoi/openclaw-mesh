@@ -57,11 +57,6 @@ const plugin: any = definePluginEntry({
     // us as a runtime extension (registrationMode unset).
     registerMeshTools(api);
 
-    if (!isFullMode) {
-      debugLog("skipping plugin-only setup: mode is not 'full'");
-      return;
-    }
-
     const resolvePath = typeof api.resolvePath === "function" ? api.resolvePath : undefined;
     const vaultPath = resolveMeshVaultPath(pluginCfg, resolvePath);
     const legacyVaultPath = resolveLegacyMeshVaultPath(pluginCfg, resolvePath);
@@ -73,6 +68,18 @@ const plugin: any = definePluginEntry({
     //   scope fix); fallback for a missing id is the signed-body SHA-256.
     const replayWindow = createReplayWindow();
 
+    // BETA-COMPAT (2026-08-16, pilot wave finding F1): the webhook route is
+    // registered BEFORE the full-mode gate. The beta loader (2026.8.1-beta.2)
+    // runs register() twice — once in "full" mode (root activation) and once
+    // in "discovery" mode (agent-runtime handle, activate:false). The
+    // discovery pass runs AFTER server start and its registry wins, so a
+    // full-mode-only route vanishes (webhook 404). registerPluginHttpRoute is
+    // mode-agnostic on the beta (no registrationMode gate in the SDK), so
+    // registering in ALL modes keeps the route alive. Stable 2026.7.1-2 is
+    // unaffected (registrationMode unset or "full" — same behavior).
+    // Verified on pilot bench: 404 -> 403 (route mounted) on beta; stable
+    // untouched (403 healthy). Evidence: fleet/artifacts/waves/
+    // 2026-08-16-openclaw-pilot-agent/outputs/finding-F1-resolution-fix-verified.md
     registerPluginHttpRoute({
       path: "/plugins/openclaw-mesh/webhook",
       auth: "plugin",
@@ -231,6 +238,15 @@ const plugin: any = definePluginEntry({
     });
 
     debugLog("registerPluginHttpRoute completed");
+
+    // Full-mode-only registrations below. The webhook route above is
+    // mode-agnostic (beta-compat, finding F1); the agent_end hook is a
+    // lightweight observability side effect that stays gated to full
+    // activation to avoid duplicate registration across beta passes.
+    if (!isFullMode) {
+      debugLog("skipping full-mode-only setup: mode is not 'full'");
+      return;
+    }
 
     // Lightweight agent_end hook for observability only.
     api.on("agent_end", async (event: any) => {
