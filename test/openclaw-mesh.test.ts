@@ -9,6 +9,7 @@ import path from "node:path";
 import { dump as yamlDump } from "js-yaml";
 import { parseMeshEnvelope, stripEnvelope } from "../src/envelope.js";
 import {
+  canonicalizePublicKey,
   listPeers,
   makeOutboundPayload,
   normalizeIdentity,
@@ -244,19 +245,20 @@ describe("resolveMeshVaultPath", () => {
 
 describe("normalizeIdentity", () => {
   it("extracts transports and falls back to top-level webhook fields", () => {
+    const { publicKey } = generateKeyPair();
     const raw = {
       name: "agent0",
       webhook_url: "http://old",
       transports: {
         hermes_webhook: {
           url: "http://new",
-          auth: { public_key: "key" },
+          auth: { public_key: publicKey },
         },
       },
     };
     const identity = normalizeIdentity(raw);
     assert.equal(identity.webhook_url, "http://new");
-    assert.equal(identity.transports?.hermes_webhook?.auth?.public_key, "key");
+    assert.equal(identity.transports?.hermes_webhook?.auth?.public_key, canonicalizePublicKey(publicKey));
   });
 });
 
@@ -438,6 +440,124 @@ describe("registerAgent", () => {
       assert.equal(peer?.a2a_url, "http://custom/a2a");
       assert.equal(peer?.webhook_url, "http://custom/webhook");
       assert.ok(peer?.transports?.hermes_webhook?.auth?.public_key?.includes("BEGIN PUBLIC KEY"));
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("key framing interop (F1)", () => {
+  function rawSpkiBase64() {
+    const { publicKey } = generateKeyPair();
+    return crypto.createPublicKey(publicKey).export({ type: "spki", format: "der" }).toString("base64");
+  }
+
+  it("AC-1.1: register with raw base64 SPKI public key → identity.yaml public_key is PEM-framed", () => {
+    const vault = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-f1-"));
+    try {
+      const agentsDir = path.join(vault, "mesh", "agents");
+      const raw = rawSpkiBase64();
+      const result = registerAgent(agentsDir, "newbie", "http://default", { public_key: raw });
+      const yamlText = fs.readFileSync(result.path, "utf-8");
+      assert.match(yamlText, /BEGIN PUBLIC KEY/);
+      assert.match(yamlText, /END PUBLIC KEY/);
+      assert.ok(result.public_key.includes("BEGIN PUBLIC KEY"));
+      assert.ok(result.public_key.includes("END PUBLIC KEY"));
+      // same key material, new framing
+      assert.equal(
+        crypto.createPublicKey(result.public_key).export({ type: "spki", format: "der" }).toString("base64"),
+        raw,
+      );
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  it("AC-1.1b: discovery-handle write (normalizeIdentity :202) with raw input → PEM in the written entry", () => {
+    const raw = rawSpkiBase64();
+    const identity = normalizeIdentity({
+      name: "agent0",
+      webhook_url: "http://old",
+      transports: {
+        hermes_webhook: {
+          url: "http://new",
+          auth: { public_key: raw },
+        },
+      },
+    });
+    const pub = identity.transports?.hermes_webhook?.auth?.public_key || "";
+    assert.ok(pub.includes("BEGIN PUBLIC KEY"));
+    assert.ok(pub.includes("END PUBLIC KEY"));
+    assert.equal(
+      crypto.createPublicKey(pub).export({ type: "spki", format: "der" }).toString("base64"),
+      raw,
+    );
+  });
+
+  it("AC-1.2: existing raw entry still registered/read (no regression)", () => {
+    const vault = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-f1-"));
+    try {
+      const agentsDir = path.join(vault, "mesh", "agents");
+      const legacyDir = path.join(agentsDir, "legacy");
+      fs.mkdirSync(legacyDir, { recursive: true });
+      const raw = rawSpkiBase64();
+      fs.writeFileSync(path.join(legacyDir, "identity.yaml"), yamlDump({
+        id: "legacy",
+        allow_loopback: true,
+        transports: {
+          hermes_webhook: {
+            url: "http://127.0.0.1:1/webhook",
+            auth: { public_key: raw },
+          },
+        },
+      }));
+      // read path still resolves the pre-existing raw entry
+      const peer = resolvePeer(agentsDir, "legacy");
+      assert.ok(peer, "legacy raw entry is still readable");
+      assert.ok(peer?.transports?.hermes_webhook?.auth?.public_key?.includes("BEGIN PUBLIC KEY"));
+      // re-register with the same raw key still works and writes PEM
+      const r = registerAgent(agentsDir, "legacy", "http://default", { public_key: raw });
+      assert.ok(r.public_key.includes("BEGIN PUBLIC KEY"));
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  it("AC-1.3: idempotent — PEM in → PEM out, canonicalize twice == once (both sites)", () => {
+    const { publicKey } = generateKeyPair();
+    // helper idempotency
+    assert.equal(canonicalizePublicKey(canonicalizePublicKey(publicKey)), canonicalizePublicKey(publicKey));
+    // registerAgent write site
+    const vault = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-f1-"));
+    try {
+      const agentsDir = path.join(vault, "mesh", "agents");
+      const r = registerAgent(agentsDir, "newbie", "http://default", { public_key: publicKey });
+      assert.ok(r.public_key.includes("BEGIN PUBLIC KEY"));
+      const r2 = registerAgent(agentsDir, "newbie", "http://default", { public_key: r.public_key });
+      assert.equal(r2.public_key, r.public_key);
+      // discovery-handle write site (normalizeIdentity)
+      const identity = normalizeIdentity({
+        transports: {
+          hermes_webhook: { url: "http://x", auth: { public_key: publicKey } },
+        },
+      });
+      assert.equal(
+        identity.transports?.hermes_webhook?.auth?.public_key,
+        canonicalizePublicKey(publicKey),
+      );
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  it("invalid public_key → existing registerAgent rejection (test stays green)", () => {
+    const vault = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-f1-"));
+    try {
+      const agentsDir = path.join(vault, "mesh", "agents");
+      assert.throws(
+        () => registerAgent(agentsDir, "newbie", "http://default", { public_key: "not-a-real-key" }),
+        /invalid public_key/,
+      );
     } finally {
       fs.rmSync(vault, { recursive: true, force: true });
     }
