@@ -1,6 +1,10 @@
 {
   "name": "@emiltsoi/openclaw-mesh",
   "version": "0.2.3",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/emiltsoi/openclaw-mesh"
+  },
   "description": "Stateful, Ed25519-signed agent-to-agent mesh messaging for OpenClaw with Hermes bridge support",
   "author": "emiltsoi",
   "type": "module",
