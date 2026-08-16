@@ -216,7 +216,9 @@ describe("U1 parse scope confinement", () => {
       });
       assert.equal(res.statusCode, 400);
       assert.equal(res.json.reason, "invalid-envelope");
-      assert.match(res.json.message, /Invalid ref/);
+      // C2 (gate 1b adversarial diff): parser-internal error text is NOT
+      // leaked in the response body — reason enum only.
+      assert.equal(res.json.message, undefined);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
