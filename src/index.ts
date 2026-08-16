@@ -125,7 +125,7 @@ const plugin: any = definePluginEntry({
           try {
             envelope = parseMeshEnvelope(text);
           } catch (e: any) {
-            sendJson(res, 400, { status: "bad-request", reason: "invalid-envelope", message: e.message });
+            sendJson(res, 400, { status: "bad-request", reason: "invalid-envelope" });
             return true;
           }
           if (!envelope) {
