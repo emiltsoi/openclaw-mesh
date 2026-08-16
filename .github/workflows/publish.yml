@@ -34,16 +34,23 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: OIDC exchange probe (diagnostic - temporary)
         run: |
-          # Token-lane publish (2026-08-15): NPM_TOKEN restored after OIDC trusted
-          # publishing returned persistent E404 (mapping verified correct on npmjs
-          # side — org/repo/workflow/permissions all match; see follow-up ticket).
-          # NODE_AUTH_TOKEN wins over the OIDC exchange when present (deterministic).
-          # OIDC path (752c520) remains the end-state; id-token: write kept for
-          # --provenance signing (sigstore uses the GitHub OIDC env, not the token).
+          curl -s -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" -o /tmp/idtoken.json
+          python3 -c "import json; print(json.load(open('/tmp/idtoken.json'))['value'])" > /tmp/idtoken.txt
+          python3 -c "import base64,json; tok=open('/tmp/idtoken.txt').read().strip(); p=tok.split('.')[1]; p+='='*(-len(p)%4); c=json.loads(base64.urlsafe_b64decode(p)); print('workflow:', c.get('job_workflow_ref'), '| sub:', c.get('sub'))"
+          echo "=== exchange ==="
+          BODY=$(curl -s -X POST -H "Authorization: Bearer $(cat /tmp/idtoken.txt)" -H "Content-Type: application/json" "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@emiltsoi%2fopenclaw-mesh" -d '{}')
+          echo "$BODY" | python3 -c "import json,sys; d=json.load(sys.stdin); print('EXCHANGE SUCCESS - npm token minted (value masked)') if 'token' in d else print('EXCHANGE FAILED:', json.dumps(d)[:200])"
+
+      - name: Publish to npm
+        run: |
+          # OIDC trusted publishing (end-state, 2026-08-16): token lane REMOVED —
+          # the automation-token lane died on the 2FA policy (E403) and the
+          # revoked-token secret shadowed the OIDC path (dead token -> anonymous
+          # PUT -> 404). NPM_TOKEN secret deleted; npm CLI falls back to the
+          # OIDC exchange when no NODE_AUTH_TOKEN is set (lib/utils/oidc.js).
+          # --provenance retained (sigstore uses the GitHub OIDC env).
           # Idempotency: skip when this version is already published (re-dispatch safe).
           VER="$(node -p "require('./package.json').version")"
           if npm view "@emiltsoi/openclaw-mesh@${VER}" version >/dev/null 2>&1; then
