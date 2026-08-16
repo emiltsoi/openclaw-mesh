@@ -34,6 +34,15 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: OIDC exchange probe (diagnostic - temporary)
+        run: |
+          curl -s -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" -o /tmp/idtoken.json
+          python3 -c "import json; print(json.load(open('/tmp/idtoken.json'))['value'])" > /tmp/idtoken.txt
+          python3 -c "import base64,json; tok=open('/tmp/idtoken.txt').read().strip(); p=tok.split('.')[1]; p+='='*(-len(p)%4); c=json.loads(base64.urlsafe_b64decode(p)); print('workflow:', c.get('job_workflow_ref'))"
+          echo "=== exchange ==="
+          BODY=$(curl -s -X POST -H "Authorization: Bearer $(cat /tmp/idtoken.txt)" -H "Content-Type: application/json" "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@emiltsoi%2fopenclaw-mesh" -d '{}')
+          echo "$BODY" | python3 -c "import json,sys; d=json.load(sys.stdin); print('EXCHANGE SUCCESS - npm token minted (value masked)') if 'token' in d else print('EXCHANGE FAILED:', json.dumps(d)[:200])"
+
       - name: Publish to npm
         run: |
           # OIDC trusted publishing (end-state, 2026-08-16): token lane REMOVED —
