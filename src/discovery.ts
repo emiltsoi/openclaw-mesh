@@ -175,6 +175,32 @@ export function resolveLegacyMeshVaultPath(
   return path.join(path.dirname(path.dirname(meshRoot)), "a2a", "agents");
 }
 
+/**
+ * F1 (2026-08-16 key-framing-interop): canonicalize a public key to PEM-framed
+ * SPKI at WRITE time so both substrates (openclaw-mesh and hermes' strict-PEM
+ * reader) agree on framing. Accepts PEM and raw base64 SPKI DER (Node's
+ * crypto.createPublicKey tolerance; raw base64 is decoded to DER explicitly).
+ * Invalid input throws so callers keep their existing rejection flow.
+ * Idempotent: PEM in -> PEM out (re-encoding an SPKI key yields SPKI PEM, never
+ * double-framed).
+ */
+export function canonicalizePublicKey(input: string): string {
+  let publicKey: crypto.KeyObject;
+  try {
+    publicKey = crypto.createPublicKey(input);
+  } catch {
+    // Raw base64 SPKI DER (the migration-bridge format) is not a PEM string;
+    // decode to DER bytes and re-parse explicitly. Garbage fails here, so the
+    // error propagates to the caller's existing invalid-key rejection.
+    publicKey = crypto.createPublicKey({
+      key: Buffer.from(input, "base64"),
+      format: "der",
+      type: "spki",
+    });
+  }
+  return publicKey.export({ type: "spki", format: "pem" }).toString();
+}
+
 export function normalizeIdentity(raw: any): MeshIdentity {
   if (!raw || typeof raw !== "object") return {};
   const data: MeshIdentity = { ...raw };
@@ -191,7 +217,12 @@ export function normalizeIdentity(raw: any): MeshIdentity {
 
   const webhookUrl = hermesWebhook.url || fallbackWebhookUrl;
   const webhookAuth = hermesWebhook.auth && typeof hermesWebhook.auth === "object" ? hermesWebhook.auth : {};
-  const publicKey = webhookAuth.public_key || "";
+  let publicKey = webhookAuth.public_key || "";
+  if (publicKey) {
+    // F1: canonicalize the identity public key to PEM SPKI at write so both
+    // substrates (openclaw-mesh + hermes strict-PEM reader) agree on framing.
+    publicKey = canonicalizePublicKey(publicKey);
+  }
 
   const a2aUrl = a2aRpc.url || fallbackA2aUrl;
 
@@ -564,9 +595,13 @@ export function registerAgent(
   if (hasPathTraversal(agentName)) {
     throw new Error(`registerAgent refused: agent name '${name}' contains path traversal`);
   }
+  // F1: canonicalize a provided public key to PEM-framed SPKI at write. Both
+  // PEM and raw base64 SPKI DER are accepted; invalid keys keep the existing
+  // rejection flow.
+  let publicPem = "";
   if (options.public_key) {
     try {
-      crypto.createPublicKey(options.public_key);
+      publicPem = canonicalizePublicKey(options.public_key);
     } catch {
       throw new Error("registerAgent refused: invalid public_key");
     }
@@ -579,9 +614,9 @@ export function registerAgent(
   const webhookUrl = options.webhook_url || `${baseUrl}/plugins/openclaw-mesh/webhook`;
 
   const agentBaseName = normalizeAgentName(options.a2a_url ? new URL(a2aUrl).hostname : agentName) || agentName;
-  const { privatePem, publicPem } = options.public_key
-    ? { privatePem: "", publicPem: options.public_key }
-    : loadOrGenerateKeyPair(agentBaseName, options as any);
+  if (!options.public_key) {
+    publicPem = loadOrGenerateKeyPair(agentBaseName, options as any).publicPem;
+  }
 
   const identity: any = {
     id: agentName,
