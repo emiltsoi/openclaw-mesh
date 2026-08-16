@@ -35,6 +35,8 @@ jobs:
         run: npm test
 
       - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}  # TEMPORARY token lane (2026-08-16): npmjs-side OIDC scope defect blocks the PUT (ticket drafted); remove env + delete secret when the OIDC exchange mints a scoped token
         run: |
           # OIDC trusted publishing (end-state, 2026-08-16): token lane REMOVED —
           # the automation-token lane died on the 2FA policy (E403) and the
