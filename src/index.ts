@@ -19,6 +19,15 @@ import type { MeshBridgePluginConfig } from "./types.js";
 
 const debugLog = createDebugLogger();
 
+// U6/C1: replay protection window — MODULE SCOPE, one per process lifetime.
+// The beta loader (2026.8.1-beta.2) runs register() twice (full + discovery,
+// finding F1). A per-registration window would orphan the first pass's window
+// when the discovery pass splices over the handler (replaceExisting:true) —
+// envelope ids seen by the first handler would be replayable indefinitely
+// through the second. A single shared window closes that gap: both passes'
+// handlers record and check the SAME store (gate 1b adversarial diff C1).
+const replayWindow = createReplayWindow();
+
 export function extractMessageText(payload: any): string {
   if (payload === null || payload === undefined || typeof payload !== "object") return "";
   if (typeof payload.text === "string") return payload.text;
@@ -60,13 +69,6 @@ const plugin: any = definePluginEntry({
     const resolvePath = typeof api.resolvePath === "function" ? api.resolvePath : undefined;
     const vaultPath = resolveMeshVaultPath(pluginCfg, resolvePath);
     const legacyVaultPath = resolveLegacyMeshVaultPath(pluginCfg, resolvePath);
-
-    // U6: wire replay protection into the webhook path. Created once per
-    // registration so tests get a fresh window and production gets one
-    // process-lifetime window. Replay key pinned below (see handler):
-    //   envelope.id from the PARSED header (made trustworthy by U1's parse
-    //   scope fix); fallback for a missing id is the signed-body SHA-256.
-    const replayWindow = createReplayWindow();
 
     // BETA-COMPAT (2026-08-16, pilot wave finding F1): the webhook route is
     // registered BEFORE the full-mode gate. The beta loader (2026.8.1-beta.2)

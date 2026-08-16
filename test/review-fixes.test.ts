@@ -514,7 +514,77 @@ describe("U6 wire replay protection", () => {
 });
 
 // ---------------------------------------------------------------------------
-// U7 — fix the boolean
+// C1 — replay-window dual-creation (gate 1b adversarial diff, 2026-08-16)
+// ---------------------------------------------------------------------------
+// The beta loader runs register() twice (full + discovery, finding F1). A
+// per-registration replay window would orphan the first pass's window when the
+// discovery pass splices over the handler (replaceExisting:true) — envelope
+// ids seen by the first handler would be replayable indefinitely through the
+// second. The fix hoists createReplayWindow() to module scope: one
+// process-lifetime window shared by BOTH passes' handlers. This mutation test
+// simulates the dual pass: record via handler A, replay via handler B → expect
+// 409. With a per-registration window this fails (second call returns 200).
+describe("C1 replay-window dual-pass (module-scope window)", () => {
+  it("C1/AC-1.1: replay across two registration passes → rejected (window shared)", async () => {
+    const { tmp, privateKey, handlerA, handlerB } = (() => {
+      const savedAgentEnv = { MESH_AGENT_NAME: process.env.MESH_AGENT_NAME, A2A_AGENT_NAME: process.env.A2A_AGENT_NAME };
+      delete process.env.MESH_AGENT_NAME;
+      delete process.env.A2A_AGENT_NAME;
+      const t = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-c1-"));
+      const vaultRoot = path.join(t, "mesh", "agents");
+      fs.mkdirSync(vaultRoot, { recursive: true });
+      const { privateKey: pk, publicKey: pub } = generateKeyPair();
+      fs.mkdirSync(path.join(vaultRoot, "agent0"), { recursive: true });
+      fs.writeFileSync(path.join(vaultRoot, "agent0", "identity.yaml"), yamlDump({
+        id: "agent0",
+        allow_loopback: true,
+        transports: { hermes_webhook: { url: "http://127.0.0.1:1/plugins/openclaw-mesh/webhook", auth: { public_key: pub } } },
+      }));
+      const inboxFile = path.join(t, "inbox.jsonl");
+      fs.writeFileSync(inboxFile, "");
+      const pluginConfig = {
+        routingAgent: "emts",
+        targetSessionKey: "agent:main:main",
+        targetAgentId: "main",
+        meshVaultPath: t,
+        inboxPath: inboxFile,
+        mirrorInbound: "none",
+        privateKeyPath: path.join(t, "bridge.pem"),
+        auditLogPath: path.join(t, "audit.jsonl"),
+      };
+      // Pass A — full registration
+      const apiA = makeApi({ pluginConfig });
+      apiA.registrationMode = "full";
+      const routesA = registerPlugin(apiA);
+      const handlerA = findWebhookHandler(routesA);
+      assert.ok(handlerA, "pass A handler registered");
+      // Pass B — discovery registration (beta dual-pass), same module scope
+      const apiB = makeApi({ pluginConfig });
+      apiB.registrationMode = "discovery";
+      const routesB = registerPlugin(apiB);
+      const handlerB = findWebhookHandler(routesB);
+      assert.ok(handlerB, "pass B handler registered");
+      return { tmp: t, privateKey: pk, handlerA, handlerB };
+    })();
+    try {
+      const wireText = "[mesh][v:1][from:agent0][to:emts][id:c1-1][action:do][reply:yes] hello";
+      const body = Buffer.from(JSON.stringify({ from: "agent0", text: wireText }));
+      const ts = currentTs();
+      const sig = signBody(privateKey, body, ts);
+      const headers = { "x-mesh-signature": sig, "x-mesh-timestamp": ts, "content-type": "application/json" };
+      // Record through pass-A handler
+      const first = await invokeWebhook(handlerA, { headers, body });
+      assert.equal(first.statusCode, 200);
+      // Replay through pass-B handler — MUST be rejected (shared window)
+      const second = await invokeWebhook(handlerB, { headers, body });
+      assert.equal(second.statusCode, 409);
+      assert.equal(second.json.reason, "replay-detected");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 describe("U7 allowInsecure registry boolean", () => {
   it("U7/AC-7.1: http:// registry WITHOUT flag → refused", () => {
