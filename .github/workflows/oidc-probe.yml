@@ -1,0 +1,34 @@
+name: OIDC probe
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Get GitHub OIDC token (npm audience)
+        run: |
+          curl -s -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" -o /tmp/idtoken.json
+          python3 -c "import json; print(json.load(open('/tmp/idtoken.json'))['value'])" > /tmp/idtoken.txt
+          echo "id token length: $(wc -c < /tmp/idtoken.txt)"
+      - name: Decode JWT claims
+        run: |
+          python3 - <<'EOF'
+          import base64, json
+          tok = open('/tmp/idtoken.txt').read().strip()
+          payload = tok.split('.')[1]
+          payload += '=' * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+          print(json.dumps({k: claims.get(k) for k in ['iss','sub','aud','repository','repository_owner','job_workflow_ref','ref','sha','repository_visibility']}, indent=1))
+          EOF
+      - name: Exchange at npm registry (the decisive call)
+        run: |
+          echo "=== exchange response ==="
+          curl -s -X POST \
+            -H "Authorization: Bearer $(cat /tmp/idtoken.txt)" \
+            -H "Content-Type: application/json" \
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@emiltsoi%2fopenclaw-mesh" \
+            -d '{}' -w "\nHTTP %{http_code}\n"
