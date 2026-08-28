@@ -49,7 +49,7 @@ describe("inbound terminal reply", () => {
     assert.equal(envelope.reply, "end");
     // Type-surface pin: MeshEnvelope.reply must accept "end" at compile time —
     // if the union regresses to "yes" | "no", this line fails typecheck.
-    const typedEnd: MeshEnvelope = { from: "agent0", to: "emts", id: "thread-1", action: "do", reply: "end" };
+    const typedEnd: MeshEnvelope = { from: "agent0", to: "emts", id: "thread-1", action: "do", reply: "end", body: "" };
     void typedEnd;
     try {
       await injectIntoSession(api, "wrap it up", envelope);

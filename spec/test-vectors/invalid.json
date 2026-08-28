@@ -1,0 +1,27 @@
+[
+  {
+    "name": "missing mesh prefix",
+    "text": "[from:hermes-0][to:diploid-0][id:msg-1][action:do][reply:yes] Hello"
+  },
+  {
+    "name": "empty to",
+    "text": "[mesh][from:hermes-0][to:][id:msg-1][action:do][reply:yes] Hello"
+  },
+  {
+    "name": "invalid action",
+    "text": "[mesh][from:hermes-0][to:diploid-0][id:msg-1][action:ask][reply:yes] Hello"
+  },
+  {
+    "name": "invalid reply",
+    "text": "[mesh][from:hermes-0][to:diploid-0][id:msg-1][action:do][reply:maybe] Hello"
+  },
+
+  {
+    "name": "whitespace in token",
+    "text": "[mesh][from:hermes 0][to:diploid-0][id:msg-1][action:do][reply:yes] Hello"
+  },
+  {
+    "name": "special chars in token",
+    "text": "[mesh][from:hermes/0][to:diploid-0][id:msg-1][action:do][reply:yes] Hello"
+  }
+]

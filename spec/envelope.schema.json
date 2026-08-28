@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://emiltsoi.github.io/mesh-peer-registry/spec/envelope.schema.json",
+  "title": "Mesh Envelope",
+  "description": "Schema for a bracketed [mesh] envelope header and body.",
+  "type": "object",
+  "required": ["header"],
+  "properties": {
+    "header": {
+      "type": "string",
+      "pattern": "^\\[mesh\\](?:\\[v:[A-Za-z0-9_.:-]{1,128}\\])?\\[from:[A-Za-z0-9_.:-]{1,128}\\]\\[to:[A-Za-z0-9_.:-]{1,128}\\]\\[id:[A-Za-z0-9_.:-]{1,128}\\](?:\\[action:(?:do|info)\\])?(?:\\[reply:(?:yes|no|end)\\])?(?:\\[ref:[A-Za-z0-9_.:-]{1,128}\\])?$",
+      "description": "The bracketed mesh envelope header. Missing action/reply default to info/no on receive."
+    },
+    "version": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+    },
+    "from": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+    },
+    "to": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+    },
+    "action": {
+      "type": "string",
+      "enum": ["do", "info"]
+    },
+    "reply": {
+      "type": "string",
+      "enum": ["yes", "no", "end"]
+    },
+    "ref": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+    },
+    "body": {
+      "type": "string",
+      "description": "Free-text body following the bracketed header."
+    },
+    "dsn": {
+      "type": "boolean",
+      "description": "True when the body starts with the literal [mesh-dsn] marker."
+    }
+  },
+  "additionalProperties": false
+}

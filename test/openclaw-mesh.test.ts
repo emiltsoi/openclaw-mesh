@@ -41,7 +41,7 @@ describe("parseMeshEnvelope", () => {
   });
 
   it("returns defaults for missing optional fields", () => {
-    const env = parseMeshEnvelope("[mesh][from:bot][id:abc]");
+    const env = parseMeshEnvelope("[mesh][from:bot][to:emts][id:abc]");
     assert.equal(env?.from, "bot");
     assert.equal(env?.to, "emts");
     assert.equal(env?.id, "abc");
@@ -53,10 +53,8 @@ describe("parseMeshEnvelope", () => {
     assert.equal(parseMeshEnvelope("hello"), null);
   });
 
-  it("ignores invalid action and reply values", () => {
-    const env = parseMeshEnvelope("[mesh][action:bad][reply:maybe]");
-    assert.equal(env?.action, "info");
-    assert.equal(env?.reply, "no");
+  it("rejects invalid action and reply values", () => {
+    assert.throws(() => parseMeshEnvelope("[mesh][from:a][to:b][id:c][action:bad][reply:maybe]"));
   });
 
   it("parses ref", () => {

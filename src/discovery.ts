@@ -284,11 +284,17 @@ export function listPeers(vaultPath: string): MeshPeer[] {
     const name = String(identity.id || identity.name || entry).toLowerCase();
     if (seen.has(name)) continue;
     seen.add(name);
-    const platforms = identity.platforms && typeof identity.platforms === "object" ? identity.platforms : {};
-    const platformNames = Object.keys(platforms).filter((k) => platforms[k]);
+    const platform =
+      typeof identity.platform === "string" && identity.platform.trim()
+        ? identity.platform.trim()
+        : (() => {
+            const platforms = identity.platforms && typeof identity.platforms === "object" ? identity.platforms : {};
+            const platformNames = Object.keys(platforms).filter((k) => platforms[k]);
+            return platformNames[0] || "unknown";
+          })();
     peers.push({
       name,
-      platform: platformNames[0] || "unknown",
+      platform,
       a2a_url: identity.a2a_url || identity.transports?.a2a_rpc?.url || "",
       webhook_url: identity.webhook_url || identity.transports?.hermes_webhook?.url || "",
       public_key: identity.public_key || identity.transports?.hermes_webhook?.auth?.public_key || "",
@@ -638,6 +644,7 @@ export function registerAgent(
 
   const platform = options.platform || "openclaw";
   if (platform) {
+    identity.platform = platform;
     identity.platforms = { [platform]: {} };
   }
 

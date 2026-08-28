@@ -62,8 +62,12 @@ export interface MeshIdentity {
   name?: string;
   description?: string;
   role?: string;
+  /** Canonical platform, matching the identity schema (hermes|openclaw|diploid). */
+  platform?: string;
+  /** Legacy/compat map of platform-specific config (e.g. telegram). */
   platforms?: Record<string, any>;
   transports?: Record<string, any>;
+  public_key?: string;
   webhook_url?: string;
   a2a_url?: string;
   allow_loopback?: boolean;

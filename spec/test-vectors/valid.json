@@ -1,0 +1,81 @@
+[
+  {
+    "name": "simple do yes",
+    "text": "[mesh][from:hermes-0][to:diploid-0][id:msg-1][action:do][reply:yes] Hello",
+    "expected": {
+      "sender": "hermes-0",
+      "recipient": "diploid-0",
+      "msg_id": "msg-1",
+      "action": "do",
+      "reply": "yes",
+      "ref": null,
+      "body": "Hello"
+    }
+  },
+  {
+    "name": "info no with ref",
+    "text": "[mesh][from:diploid-0][to:hermes-0][id:msg-2][action:info][reply:no][ref:msg-1] Done",
+    "expected": {
+      "sender": "diploid-0",
+      "recipient": "hermes-0",
+      "msg_id": "msg-2",
+      "action": "info",
+      "reply": "no",
+      "ref": "msg-1",
+      "body": "Done"
+    }
+  },
+  {
+    "name": "terminal end",
+    "text": "[mesh][from:hermes-0][to:diploid-0][id:msg-3][action:info][reply:end] Closing thread",
+    "expected": {
+      "sender": "hermes-0",
+      "recipient": "diploid-0",
+      "msg_id": "msg-3",
+      "action": "info",
+      "reply": "end",
+      "ref": null,
+      "body": "Closing thread"
+    }
+  },
+  {
+    "name": "with version",
+    "text": "[mesh][v:1][from:openclaw-0][to:diploid-0][id:msg-4][action:do][reply:yes] V",
+    "expected": {
+      "sender": "openclaw-0",
+      "recipient": "diploid-0",
+      "msg_id": "msg-4",
+      "action": "do",
+      "reply": "yes",
+      "ref": null,
+      "version": "1",
+      "body": "V"
+    }
+  },
+  {
+    "name": "dsn body",
+    "text": "[mesh][from:hermes-0][to:diploid-0][id:msg-5][action:info][reply:no][ref:msg-1] [mesh-dsn][status:failed][reason:unreachable] Delivery of message msg-1 failed.",
+    "expected": {
+      "sender": "hermes-0",
+      "recipient": "diploid-0",
+      "msg_id": "msg-5",
+      "action": "info",
+      "reply": "no",
+      "ref": "msg-1",
+      "body": "[mesh-dsn][status:failed][reason:unreachable] Delivery of message msg-1 failed."
+    }
+  },
+  {
+    "name": "missing action/reply defaults",
+    "text": "[mesh][from:hermes-0][to:diploid-0][id:msg-6] default body",
+    "expected": {
+      "sender": "hermes-0",
+      "recipient": "diploid-0",
+      "msg_id": "msg-6",
+      "action": "info",
+      "reply": "no",
+      "ref": null,
+      "body": "default body"
+    }
+  }
+]

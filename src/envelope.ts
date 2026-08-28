@@ -1,5 +1,5 @@
 export interface MeshEnvelope {
-  v?: string;
+  version?: string;
   from: string;
   to: string;
   id: string;
@@ -7,12 +7,23 @@ export interface MeshEnvelope {
   reply: "yes" | "no" | "end";
   ref?: string;
   dsn?: boolean;
+  body: string;
 }
 
-const ENVELOPE_HEADER_RE = /^(\[mesh\](?:\[[^\]]*:[^\]]*\])*)/;
-const FIELD_RE = /\[(\w+):([^\]]+)\]/g;
+// Canonical mesh envelope header pattern, kept in sync with
+// mesh-peer-registry/spec/envelope.schema.json.
+// Order is strict: [mesh] [v:?] [from] [to] [id] [action:?] [reply:?] [ref:?]
+const MESH_ENVELOPE_RE = /^\s*\[mesh\](?:\[v:([^\]]+)\])?\[from:([^\]]+)\]\[to:([^\]]+)\]\[id:([^\]]+)\](?:\[action:([^\]]+)\])?(?:\[reply:([^\]]+)\])?(?:\[ref:([^\]]+)\])?/;
 
-// Matches hermes-mesh validate_envelope_token: 1-128 chars of A-Za-z0-9_.:-
+// Loose header matcher used only by stripEnvelope. It removes any bracketed
+// [key:value] tokens after [mesh] without validating them, so callers that
+// already received a well-formed envelope can extract the body text.
+const ENVELOPE_HEADER_RE = /^(\[mesh\](?:\[[^\]]*:[^\]]*\])*)/;
+
+const VALID_ACTIONS = new Set<"do" | "info">(["do", "info"]);
+const VALID_REPLIES = new Set<"yes" | "no" | "end">(["yes", "no", "end"]);
+
+// Matches mesh_core.validate_envelope_token: 1-128 chars of A-Za-z0-9_.:-
 export const ENVELOPE_TOKEN_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 export function validateMeshToken(value: string, field = "token"): string {
@@ -27,69 +38,82 @@ export function validateMeshToken(value: string, field = "token"): string {
   return trimmed;
 }
 
+export class MeshEnvelopeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MeshEnvelopeError";
+  }
+}
+
+/**
+ * Parse a bracketed [mesh] envelope.
+ *
+ * - Returns null for text that does not start with a [mesh] header at all.
+ * - Throws MeshEnvelopeError for text that starts with [mesh] but is malformed
+ *   or contains invalid tokens/values. This lets callers distinguish a non-mesh
+ *   payload (200 ignored) from a bad mesh payload (400 bad-request).
+ *
+ * Missing action/reply default to the conservative values info/no, matching
+ * mesh_core.parse_envelope.
+ */
 export function parseMeshEnvelope(text: string): MeshEnvelope | null {
   if (!text.startsWith("[mesh]")) return null;
 
-  // U1 (parse-scope confinement): envelope fields are parsed from the
-  // `stripEnvelope` header match ONLY. The body is never scanned for
-  // [key:value] tokens, so a hostile body cannot override header fields
-  // (reply downgrade, spoofed from/to/id/ref).
-  const headerMatch = ENVELOPE_HEADER_RE.exec(text);
-  if (!headerMatch) return null;
-  const header = headerMatch[0];
+  const m = MESH_ENVELOPE_RE.exec(text);
+  if (!m) {
+    throw new MeshEnvelopeError("Malformed mesh envelope header");
+  }
 
-  const envelope: MeshEnvelope = {
-    from: "unknown",
-    to: "emts",
-    id: "unknown",
-    action: "info",
-    reply: "no",
+  const [
+    ,
+    rawVersion,
+    rawFrom,
+    rawTo,
+    rawId,
+    rawAction,
+    rawReply,
+    rawRef,
+  ] = m;
+
+  const version = rawVersion ? validateMeshToken(rawVersion, "version") : undefined;
+  const from = validateMeshToken(rawFrom, "from");
+  const to = validateMeshToken(rawTo, "to");
+  const id = validateMeshToken(rawId, "id");
+
+  const actionRaw = (rawAction ?? "info").trim();
+  if (!VALID_ACTIONS.has(actionRaw as any)) {
+    throw new MeshEnvelopeError(`Invalid action: ${JSON.stringify(actionRaw)}; must be 'do' or 'info'`);
+  }
+  const action: "do" | "info" = actionRaw as any;
+
+  const replyRaw = (rawReply ?? "no").trim();
+  if (!VALID_REPLIES.has(replyRaw as any)) {
+    throw new MeshEnvelopeError(`Invalid reply: ${JSON.stringify(replyRaw)}; must be 'yes', 'no', or 'end'`);
+  }
+  const reply: "yes" | "no" | "end" = replyRaw as any;
+
+  const ref = rawRef ? validateMeshToken(rawRef, "ref") : undefined;
+
+  const body = text.slice(m[0].length).trimStart();
+  const dsn = body.startsWith("[mesh-dsn]");
+
+  return {
+    version,
+    from,
+    to,
+    id,
+    action,
+    reply,
+    ref,
+    dsn,
+    body,
   };
-
-  FIELD_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = FIELD_RE.exec(header)) !== null) {
-    const [, key, rawValue] = match;
-    const value = rawValue.trim();
-    switch (key) {
-      case "v":
-        envelope.v = value;
-        break;
-      case "from":
-        envelope.from = value;
-        break;
-      case "to":
-        envelope.to = value;
-        break;
-      case "id":
-        envelope.id = value;
-        break;
-      case "action":
-        if (value === "do" || value === "info") envelope.action = value;
-        break;
-      case "reply":
-        if (value === "yes" || value === "no" || value === "end") envelope.reply = value;
-        break;
-      case "ref":
-        // U5: invalid ref is LOUD — throw so the caller can reject with a 400
-        // instead of silently dropping it.
-        envelope.ref = validateMeshToken(value, "ref");
-        break;
-    }
-  }
-
-  const body = text.slice(header.length).trimStart();
-  if (body.startsWith("[mesh-dsn]")) {
-    envelope.dsn = true;
-  }
-
-  return envelope;
 }
 
 export function stripEnvelope(text: string): string {
-  const match = ENVELOPE_HEADER_RE.exec(text);
-  if (!match) return text;
-  return text.slice(match[0].length).trimStart();
+  const m = ENVELOPE_HEADER_RE.exec(text);
+  if (!m) return text;
+  return text.slice(m[0].length).trimStart();
 }
 
 export function validateTimestamp(headers: Record<string, string | undefined>): { ok: boolean; reason?: string } {
