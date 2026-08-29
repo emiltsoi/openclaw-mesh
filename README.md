@@ -319,15 +319,18 @@ npm test            # Run unit tests with node:test
 
 CI is configured in `.github/workflows/ci.yml` and runs `typecheck`, `build`, and `test` on every push and pull request to `main`.
 
-## Platform Pairing
+## Cross-harness mesh
 
-| Platform | Mesh Repo |
-|----------|-----------|
-| Hermes | [hermes-mesh](https://github.com/emiltsoi/hermes-mesh) |
-| OpenClaw | openclaw-mesh (this repo) |
-| Shared registry | [mesh-peer-registry](https://github.com/emiltsoi/mesh-peer-registry) / [PyPI](https://pypi.org/project/mesh-peer-registry/) |
+The same `[mesh]` envelope and Ed25519 wire format works across three harnesses:
 
-Hermes and OpenClaw use the same `[mesh]` envelope format and Ed25519 signatures.
+| Harness | Mesh bridge |
+|---|---|
+| **Hermes** | [hermes-mesh](https://github.com/emiltsoi/hermes-mesh) |
+| **OpenClaw** | openclaw-mesh (this repo) |
+| **diploid-agent** | [diploid-mesh](https://github.com/emiltsoi/diploid-mesh) |
+| **Shared registry** | [mesh-peer-registry](https://github.com/emiltsoi/mesh-peer-registry) / [PyPI](https://pypi.org/project/mesh-peer-registry/) |
+
+All three share the same local vault layout (`mesh/agents/<name>/identity.yaml`) and the same optional `mesh-peer-registry` server. This means an OpenClaw agent can `mesh_send` to a Hermes peer, a Hermes agent can send to a diploid-agent peer, and an OpenClaw agent can receive a reply from a diploid agent — with the same identity files, the same envelope, and the same signatures everywhere.
 
 ## License
 
