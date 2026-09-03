@@ -4,7 +4,9 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
+import { createRequire } from "node:module";
 import type { MeshEnvelope } from "./envelope.js";
 import { validateMeshToken } from "./envelope.js";
 import { createDebugLogger } from "./logging.js";
@@ -17,6 +19,59 @@ const DEFAULT_INBOX = "/tmp/openclaw-mesh/mesh-inbox.jsonl";
 const debugLog = createDebugLogger();
 
 const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
+
+/**
+ * Resolve the real session uuid for a target sessionKey from the OpenClaw 2.0
+ * agent sqlite store (`session_nodes.current_session_id`), so the value passed
+ * to `runEmbeddedAgent` matches the store entry the runtime's writer-admission
+ * compares against. On Kore-era (JSONL) stores or missing rows, fall back to
+ * the key-derived id — backward-compatible with 2026.7.x.
+ *
+ * Read-only: never writes to the store. Any error (file missing, table absent,
+ * read failure) is caught and logged; the key-derived fallback is returned.
+ */
+export function resolveSessionIdForRun(
+  sessionKey: string,
+  agentId: string,
+  workspaceDir: string,
+): string {
+  const fallback = resolveSessionIdFromKey(sessionKey);
+  const dbPath = path.join(workspaceDir, "agents", agentId, "agent", "openclaw-agent.sqlite");
+  let DatabaseSync: any;
+  try {
+    // node:sqlite is available on Node >= 22. The openclaw runtime itself uses
+    // it for its sqlite store on 2.0; on Kore-era hosts it is absent and we
+    // fall back to the key-derived id. createRequire keeps this working in ESM.
+    ({ DatabaseSync } = createRequire(import.meta.url)("node:sqlite"));
+  } catch (e: any) {
+    debugLog(`resolveSessionIdForRun: node:sqlite unavailable (${e.message || e}); using key-derived sessionId`);
+    return fallback;
+  }
+  let db: any;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+  } catch (e: any) {
+    debugLog(`resolveSessionIdForRun: cannot open ${dbPath} (${e.message || e}); using key-derived sessionId`);
+    return fallback;
+  }
+  try {
+    const row = db.prepare(
+      "SELECT current_session_id AS sid FROM session_nodes WHERE session_key = ?",
+    ).get(sessionKey) as { sid?: string } | undefined;
+    if (row && typeof row.sid === "string" && row.sid.length > 0) {
+      debugLog(`resolveSessionIdForRun: resolved ${sessionKey} -> ${row.sid} from session_nodes`);
+      return row.sid;
+    }
+    debugLog(`resolveSessionIdForRun: no session_nodes row for ${sessionKey}; using key-derived sessionId`);
+    return fallback;
+  } catch (e: any) {
+    // Table missing (Kore-era) or query error -> fall back.
+    debugLog(`resolveSessionIdForRun: session_nodes read failed (${e.message || e}); using key-derived sessionId`);
+    return fallback;
+  } finally {
+    try { db.close(); } catch { /* ignore */ }
+  }
+}
 
 export function resolveModel(
   pluginCfg: MeshBridgePluginConfig,
@@ -86,7 +141,6 @@ export async function injectIntoSession(
     pluginCfg.targetAgentId ||
     (targetSessionKey.match(/^agent:([^:]+):/)?.[1] as string | undefined) ||
     "main";
-  const sessionId = resolveSessionIdFromKey(targetSessionKey);
 
   // Step 1: Write to inbox for durability (belt-and-suspenders).
   // U16: an unwritable inbox is LOUD — throw so the webhook returns non-200
@@ -122,6 +176,11 @@ export async function injectIntoSession(
 
   // Resolve the target model so auth resolves to the configured provider.
   const { provider, model } = resolveModel(pluginCfg, globalCfg);
+
+  // OpenClaw 2.0 (sqlite session store): resolve the REAL session uuid from
+  // session_nodes so writer-admission (claimAgentSessionWriter) sees a match.
+  // Kore-era (JSONL) / missing row / missing store -> key-derived fallback.
+  const sessionId = resolveSessionIdForRun(targetSessionKey, targetAgentId, workspaceDir);
 
   debugLog(`starting embedded agent run ${runId} for session ${targetSessionKey} (agent ${targetAgentId}, sessionId ${sessionId}, channel ${messageChannel}, model ${provider}/${model})`);
 
