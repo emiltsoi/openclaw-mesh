@@ -250,16 +250,24 @@ export async function injectIntoSession(
         debugLog("embedded run telegram-mirror skipped: agent already replied via messaging tool");
         return;
       }
-      // Extract the assistant's final text output from the run payloads.
-      const payloads: any[] = runResult.payloads || [];
-      const finalText = payloads
-        .filter((p: any) => typeof p?.text === "string" && !p.isError && !p.isReasoning)
-        .map((p: any) => p.text)
-        .join("\n")
-        .trim();
+      // Extract the assistant's final text output from the run result.
+      // Mesh-injected runs have no delivery channel, so `payloads` stays
+      // empty — the text lives in `meta.finalAssistantVisibleText`.
+      const runMeta: any = runResult.meta || {};
+      let finalText = String(
+        runMeta.finalAssistantVisibleText
+        || runMeta.finalAssistantRawText
+        || ""
+      ).trim();
       if (!finalText) {
-        debugLog("embedded run telegram-mirror skipped: no deliverable text output");
-        return;
+        const payloadTexts: string[] = (runResult.payloads || [])
+          .filter((p: any) => typeof p?.text === "string" && !p.isError && !p.isReasoning)
+          .map((p: any) => p.text);
+        if (payloadTexts.length === 0) {
+          debugLog("embedded run telegram-mirror skipped: no deliverable text output");
+          return;
+        }
+        finalText = payloadTexts.join("\n").trim();
       }
       const mirrorTarget = pluginCfg.mirrorOutbound || pluginCfg.mirrorInbound;
       if (!mirrorTarget || mirrorTarget === "none") {
