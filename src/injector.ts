@@ -11,7 +11,7 @@ import type { MeshEnvelope } from "./envelope.js";
 import { validateMeshToken } from "./envelope.js";
 import { createDebugLogger } from "./logging.js";
 import { mirrorMessage } from "./mirror.js";
-import { sendDeliveryError } from "./discovery.js";
+import { sendDeliveryError, sendToAgent, resolvePeer, resolveMeshVaultPath, resolveLegacyMeshVaultPath } from "./discovery.js";
 import { resolveEffectivePluginConfig } from "./config.js";
 import type { MeshBridgePluginConfig } from "./types.js";
 
@@ -231,6 +231,66 @@ export async function injectIntoSession(
       fs.appendFileSync(inboxDir, JSON.stringify({ ts: Date.now(), error: e.message || String(e), sessionKey: targetSessionKey, text }) + "\n");
     } catch (err: any) {
       debugLog(`inbox error write failed: ${err.message || err}`);
+    }
+  }).then(async (runResult: any) => {
+    // Auto-reply: the embedded run's output has NO default delivery path —
+    // a direct Telegram turn streams to the user natively, but a mesh-injected
+    // run would otherwise be orphaned (done, silent) unless the agent
+    // explicitly called mesh_send. Mirror the Hermes behavior: deliver the
+    // run's final output back to the original sender when the envelope asked
+    // for a reply and the agent did not already deliver one via a tool.
+    try {
+      if (!runResult) return;
+      // If the agent already sent a reply via a messaging tool (mesh_send /
+      // telegram), the mesh contract is already satisfied — do not double-send.
+      const alreadyReplied = runResult.didDeliverSourceReplyViaMessageTool === true
+        || runResult.didSendViaMessagingTool === true;
+      if (alreadyReplied) {
+        debugLog("embedded run auto-reply skipped: agent already replied via messaging tool");
+        return;
+      }
+      // envelope.reply semantics: only auto-reply when the sender asked for one.
+      if (envelope.reply !== "yes") {
+        debugLog(`embedded run auto-reply skipped: envelope reply=${envelope.reply} (not 'yes')`);
+        return;
+      }
+
+      // Extract the assistant's final text output from the run payloads.
+      const payloads: any[] = runResult.payloads || [];
+      const finalText = payloads
+        .filter((p: any) => typeof p?.text === "string" && !p.isError && !p.isReasoning)
+        .map((p: any) => p.text)
+        .join("\n")
+        .trim();
+      if (!finalText) {
+        debugLog("embedded run auto-reply skipped: no deliverable text output");
+        return;
+      }
+
+      // Resolve the original sender as a peer and deliver the run output back.
+      const extra = resolveEffectivePluginConfig(api);
+      const resolvePath = typeof api.resolvePath === "function" ? api.resolvePath : undefined;
+      const vaultPath = resolveMeshVaultPath(extra, resolvePath);
+      const legacyVaultPath = resolveLegacyMeshVaultPath(extra, resolvePath);
+      const fromName = pluginCfg.routingAgent || pluginCfg.targetAgentId || "emts";
+      const senderPeer = resolvePeer(vaultPath, envelope.from) || resolvePeer(legacyVaultPath, envelope.from);
+      if (!senderPeer) {
+        debugLog(`embedded run auto-reply: sender '${envelope.from}' not resolvable — skipping`);
+        return;
+      }
+      const replyId = `mesh-${crypto.randomUUID()}`;
+      const replyText = finalText.slice(0, 6000);
+      await sendToAgent(fromName, senderPeer, replyText, "do", "no", replyId, api, envelope.id, false);
+      debugLog(`embedded run auto-reply sent to ${envelope.from} (${replyText.length} chars)`);
+
+      // Surface the completion on the configured mirror (e.g. Emil's Telegram)
+      // so `reply:no` work still reports completion to the family.
+      if (pluginCfg.mirrorOutbound && pluginCfg.mirrorOutbound !== "none") {
+        const outboundDisplay = `📤 [Mesh reply to ${envelope.from}]\n\n${replyText}`;
+        await mirrorMessage(pluginCfg.mirrorOutbound, outboundDisplay, api);
+      }
+    } catch (e: any) {
+      debugLog(`embedded run auto-reply failed: ${e.message || e}`);
     }
   });
 
