@@ -6,6 +6,11 @@ export interface MeshBridgePluginConfig {
   routingAgent?: string;
   /** Target OpenClaw session key (e.g. "agent:main:main"). */
   targetSessionKey?: string;
+  /** Session map (0.1.8 session-selector): session name -> targetSessionKey.
+   * A [session:<name>] token routes to the mapped key; absent/unmapped ->
+   * targetSessionKey. */
+  sessionMap?: Record<string, string>;
+  session_map?: Record<string, string>;
   /** Target OpenClaw agent ID (e.g. "main"). */
   targetAgentId?: string;
   /** Channel to attribute the injected turn to. */

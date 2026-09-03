@@ -335,6 +335,8 @@ export function makeOutboundPayload(
   reply = "yes",
   id?: string,
   ref?: string,
+  session?: string,
+  fromSession?: string,
 ): string {
   // U11: validate enum values and use validateMeshToken's trimmed return for
   // from/to. Invalid action/reply/ref throw instead of silently interpolating
@@ -350,7 +352,15 @@ export function makeOutboundPayload(
     throw new Error(`Invalid reply: ${JSON.stringify(trimmedReply)}. Allowed: yes, no, end`);
   }
   const envelopeId = id && typeof id === "string" && id.trim() ? validateMeshToken(id, "envelope id") : `mesh-${crypto.randomUUID()}`;
-  let header = `[mesh][v:1][from:${trimmedFrom}][to:${trimmedTo}][id:${envelopeId}][action:${trimmedAction}][reply:${trimmedReply}]`;
+  let header = `[mesh][v:1][from:${trimmedFrom}][to:${trimmedTo}][id:${envelopeId}]`;
+  // Session-selector tokens (0.1.8): emitted in canonical order after [id].
+  if (session && typeof session === "string" && session.trim()) {
+    header += `[session:${validateMeshToken(session, "session")}]`;
+  }
+  if (fromSession && typeof fromSession === "string" && fromSession.trim()) {
+    header += `[from_session:${validateMeshToken(fromSession, "from_session")}]`;
+  }
+  header += `[action:${trimmedAction}][reply:${trimmedReply}]`;
   if (ref && typeof ref === "string" && ref.trim()) {
     // U5: loud — never silently drop an invalid ref.
     header += `[ref:${validateMeshToken(ref, "ref")}]`;
@@ -406,6 +416,8 @@ export async function sendToAgent(
   api?: any,
   ref?: string,
   isDsn = false,
+  session?: string,
+  fromSession?: string,
 ): Promise<{ ok: boolean; status?: number; error?: string; delivery_id?: string; text?: string }> {
   const webhookUrl = peer.webhook_url || peer.transports?.hermes_webhook?.url || "";
   if (!webhookUrl) return { ok: false, error: "peer has no hermes_webhook url" };
@@ -418,7 +430,7 @@ export async function sendToAgent(
   try {
     payload = {
       from: fromName,
-      text: makeOutboundPayload(fromName, toName, message, action, reply, id, ref),
+      text: makeOutboundPayload(fromName, toName, message, action, reply, id, ref, session, fromSession),
     };
   } catch (e: any) {
     // U5/U11: invalid ref/action/reply → loud failure, never ok:true.

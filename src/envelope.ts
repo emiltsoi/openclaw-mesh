@@ -6,14 +6,17 @@ export interface MeshEnvelope {
   action: "do" | "info";
   reply: "yes" | "no" | "end";
   ref?: string;
+  session?: string;
+  fromSession?: string;
   dsn?: boolean;
   body: string;
 }
 
 // Canonical mesh envelope header pattern, kept in sync with
 // mesh-peer-registry/spec/envelope.schema.json.
-// Order is strict: [mesh] [v:?] [from] [to] [id] [action:?] [reply:?] [ref:?]
-const MESH_ENVELOPE_RE = /^\s*\[mesh\](?:\[v:([^\]]+)\])?\[from:([^\]]+)\]\[to:([^\]]+)\]\[id:([^\]]+)\](?:\[action:([^\]]+)\])?(?:\[reply:([^\]]+)\])?(?:\[ref:([^\]]+)\])?/;
+// Order is strict: [mesh] [v:?] [from] [to] [id] [session?] [from_session?] [action:?] [reply:?] [ref:?]
+const MESH_ENVELOPE_RE =
+  /^\s*\[mesh\](?:\[v:([^\]]+)\])?\[from:([^\]]+)\]\[to:([^\]]+)\]\[id:([^\]]+)\](?:\[session:([^\]]+)\])?(?:\[from_session:([^\]]+)\])?(?:\[action:([^\]]+)\])?(?:\[reply:([^\]]+)\])?(?:\[ref:([^\]]+)\])?/;
 
 // Loose header matcher used only by stripEnvelope. It removes any bracketed
 // [key:value] tokens after [mesh] without validating them, so callers that
@@ -70,6 +73,8 @@ export function parseMeshEnvelope(text: string): MeshEnvelope | null {
     rawFrom,
     rawTo,
     rawId,
+    rawSession,
+    rawFromSession,
     rawAction,
     rawReply,
     rawRef,
@@ -79,6 +84,11 @@ export function parseMeshEnvelope(text: string): MeshEnvelope | null {
   const from = validateMeshToken(rawFrom, "from");
   const to = validateMeshToken(rawTo, "to");
   const id = validateMeshToken(rawId, "id");
+
+  const session = rawSession ? validateMeshToken(rawSession, "session") : undefined;
+  const fromSession = rawFromSession
+    ? validateMeshToken(rawFromSession, "from_session")
+    : undefined;
 
   const actionRaw = (rawAction ?? "info").trim();
   if (!VALID_ACTIONS.has(actionRaw as any)) {
@@ -105,6 +115,8 @@ export function parseMeshEnvelope(text: string): MeshEnvelope | null {
     action,
     reply,
     ref,
+    session,
+    fromSession,
     dsn,
     body,
   };

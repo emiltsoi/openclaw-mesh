@@ -53,13 +53,35 @@ export async function injectIntoSession(
   const sanitize = (s: string) => s.replace(/[\[\]]/g, "");
   // U10: rebuild the header with [v:1] and carry [ref:...] when present so the
   // inbox/prompt preserves the reply reference.
-  let header = `[mesh][v:1][from:${sanitize(envelope.from)}][to:${sanitize(envelope.to)}][id:${sanitize(envelope.id)}][action:${sanitize(envelope.action)}][reply:${sanitize(envelope.reply)}]`;
+  let header = `[mesh][v:1][from:${sanitize(envelope.from)}][to:${sanitize(envelope.to)}][id:${sanitize(envelope.id)}]`;
+  // Session-selector tokens (0.1.8): preserve them in the rebuilt header so
+  // the reply can swap session/from_session.
+  if (envelope.session) {
+    header += `[session:${sanitize(envelope.session)}]`;
+  }
+  if (envelope.fromSession) {
+    header += `[from_session:${sanitize(envelope.fromSession)}]`;
+  }
+  header += `[action:${sanitize(envelope.action)}][reply:${sanitize(envelope.reply)}]`;
   if (envelope.ref) {
     header += `[ref:${sanitize(envelope.ref)}]`;
   }
   const text = `${header} ${messageText}`;
 
-  const targetSessionKey = pluginCfg.targetSessionKey || "agent:main:main";
+  // Session-selector routing (0.1.8): [session:<name>] looks up the local
+  // session_map (session name -> targetSessionKey). Absent/unmapped -> the
+  // configured default (unchanged, backward-compatible).
+  let targetSessionKey = pluginCfg.targetSessionKey || "agent:main:main";
+  if (envelope.session) {
+    const sessionMap = pluginCfg.sessionMap || pluginCfg.session_map || {};
+    const mapped = sessionMap[envelope.session];
+    if (mapped) {
+      targetSessionKey = mapped;
+      debugLog(`session_map: [session:${envelope.session}] -> ${mapped}`);
+    } else {
+      debugLog(`session_map: [session:${envelope.session}] not mapped — using default ${targetSessionKey}`);
+    }
+  }
   const targetAgentId =
     pluginCfg.targetAgentId ||
     (targetSessionKey.match(/^agent:([^:]+):/)?.[1] as string | undefined) ||
