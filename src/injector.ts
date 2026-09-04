@@ -51,9 +51,18 @@ async function resolveRunWithAdmission(runtime: any): Promise<((run: () => Promi
     const require = createRequire(import.meta.url);
     let runtimeRoot: string | null = null;
     try {
-      // Resolve the openclaw package the gateway actually runs.
-      const pkgPath = require.resolve("openclaw/package.json");
-      runtimeRoot = path.dirname(path.dirname(pkgPath)); // <runtime>/node_modules/openclaw
+      // Resolve the openclaw package the gateway actually runs. Static imports
+      // from "openclaw/plugin-sdk/..." work in the gateway, so the native ESM
+      // resolver (import.meta.resolve) sees the same package the gateway loaded.
+      // Resolve a path the exports map EXPOSES (plugin-sdk/runtime), then walk
+      // up to the package root (<pkg>/dist/plugin-sdk/runtime.js -> <pkg>).
+      const resolver = (import.meta as any).resolve
+        ? (p: string) => String((import.meta as any).resolve(p)).replace(/^file:\/\//, "")
+        : (p: string) => require.resolve(p);
+      const sdkEntry = resolver("openclaw/plugin-sdk/runtime");
+      // <runtime>/node_modules/openclaw/dist/plugin-sdk/runtime.js
+      const pkgRoot = path.dirname(path.dirname(path.dirname(sdkEntry))); // .../openclaw
+      runtimeRoot = pkgRoot;
     } catch {
       runtimeRoot = null;
     }
