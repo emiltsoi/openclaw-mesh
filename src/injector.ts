@@ -21,6 +21,84 @@ const debugLog = createDebugLogger();
 const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
 
 /**
+ * Resolve + import the runtime's gateway-work-admission module and return the
+ * `runWithGatewayIndependentRootWorkAdmission` wrapper.
+ *
+ * The 2.0 runtime requires independent root-less work (like our embedded runs)
+ * to be wrapped in an independent root-work admission — every other background
+ * path (delivery-queue, bash-tools, heartbeat-wake) does this. openclaw-mesh
+ * was the one path that didn't, so its runs only admitted when the gateway's
+ * suspendPhase happened to be 'accepting' (the ~6-min post-boot window),
+ * otherwise failing with the generic "Gateway is draining" error.
+ *
+ * Hardened against both fragilities:
+ *  - filename glob (gateway-work-admission-*.js) self-heals across runtime bumps
+ *  - export-alias scan: the minifier renames exports to single letters between
+ *    builds, but keeps the function's own name — find by value, not alias.
+ *
+ * Returns null when the module can't be resolved (never throws) — the caller
+ * falls back to the direct (unwrapped) call so a failed import never kills
+ * mesh delivery.
+ */
+async function resolveRunWithAdmission(runtime: any): Promise<((run: () => Promise<any>, origin: string) => Promise<any>) | null> {
+  try {
+    // The runtime dir: derive from the api.runtime's own module location.
+    // runtime.agent.resolveAgentWorkspaceDir gives the WORKSPACE, not the
+    // runtime — find the runtime by walking up from the openclaw package we
+    // know is loaded. Use createRequire to resolve 'openclaw/package.json'
+    // from OUR module context — the plugin is installed under the workspace,
+    // but node resolves the symlinked runtime through the gateway's loader.
+    const require = createRequire(import.meta.url);
+    let runtimeRoot: string | null = null;
+    try {
+      // Resolve the openclaw package the gateway actually runs.
+      const pkgPath = require.resolve("openclaw/package.json");
+      runtimeRoot = path.dirname(path.dirname(pkgPath)); // <runtime>/node_modules/openclaw
+    } catch {
+      runtimeRoot = null;
+    }
+    if (!runtimeRoot) {
+      debugLog("runWithAdmission: could not resolve openclaw runtime root; falling back to direct run");
+      return null;
+    }
+    const distDir = path.join(runtimeRoot, "dist");
+    if (!fs.existsSync(distDir)) {
+      debugLog(`runWithAdmission: no dist dir at ${distDir}; falling back to direct run`);
+      return null;
+    }
+    const candidates = fs.readdirSync(distDir).filter((f) => /^gateway-work-admission-[A-Za-z0-9_-]+\.js$/.test(f));
+    if (candidates.length === 0) {
+      debugLog("runWithAdmission: gateway-work-admission module not found in dist; falling back to direct run");
+      return null;
+    }
+    const modPath = path.join(distDir, candidates[0]);
+    const mod: any = await import(modPath);
+    // Defensive alias resolution: prefer a direct export, else scan by function name.
+    let wrapper: any = null;
+    if (typeof mod.runWithGatewayIndependentRootWorkAdmission === "function") {
+      wrapper = mod.runWithGatewayIndependentRootWorkAdmission;
+    } else {
+      for (const key of Object.keys(mod)) {
+        const candidate = (mod as any)[key];
+        if (typeof candidate === "function" && /runWithGatewayIndependentRootWorkAdmission/.test(candidate.name || "")) {
+          wrapper = candidate;
+          break;
+        }
+      }
+    }
+    if (typeof wrapper !== "function") {
+      debugLog("runWithAdmission: admission wrapper not found in module exports; falling back to direct run");
+      return null;
+    }
+    debugLog("runWithAdmission: resolved gateway-work-admission wrapper");
+    return wrapper;
+  } catch (e: any) {
+    debugLog(`runWithAdmission: import failed (${e.message || e}); falling back to direct run`);
+    return null;
+  }
+}
+
+/**
  * Resolve the real session uuid for a target sessionKey from the OpenClaw 2.0
  * agent sqlite store (`session_nodes.current_session_id`), so the value passed
  * to `runEmbeddedAgent` matches the store entry the runtime's writer-admission
@@ -197,8 +275,12 @@ export async function injectIntoSession(
   debugLog(`starting embedded agent run ${runId} for session ${targetSessionKey} (agent ${targetAgentId}, sessionId ${sessionId}, channel ${messageChannel}, model ${provider}/${model})`);
 
   // Fire-and-forget: the HTTP webhook should return quickly, but the run
-  // continues on the gateway event loop.
-  runtime.agent.runEmbeddedAgent({
+  // continues on the gateway event loop. The run is wrapped in the runtime's
+  // independent root-work admission (same pattern as delivery-queue:drain) so
+  // embedded runs admit reliably BETWEEN gateway turns — not only when the
+  // gateway's suspendPhase happens to be 'accepting'.
+  const runWithAdmission = await resolveRunWithAdmission(runtime);
+  const runPromise = runtime.agent.runEmbeddedAgent({
     agentId: targetAgentId,
     sessionId,
     sessionKey: targetSessionKey,
@@ -293,6 +375,19 @@ export async function injectIntoSession(
       debugLog(`embedded run telegram-mirror failed: ${e.message || e}`);
     }
   });
+
+  // Wrap the entire chain in the runtime's independent root-work admission so
+  // embedded runs admit reliably between gateway turns. If the wrapper could
+  // not be resolved, run unwrapped (never break mesh delivery).
+  if (runWithAdmission) {
+    runWithAdmission(async () => {
+      await runPromise;
+    }, "openclaw-mesh:embedded-run").catch((e: any) => {
+      debugLog(`embedded run admission wrap failed: ${e.message || e}`);
+    });
+  } else {
+    runPromise.catch(() => { /* errors already handled in-chain */ });
+  }
 
   debugLog("embedded agent run started");
 }
