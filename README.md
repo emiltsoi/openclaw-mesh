@@ -33,10 +33,25 @@ The same flow works when the sender is a Hermes mesh agent.
 The plugin:
 
 1. Verifies the inbound `X-Mesh-Signature` and `X-Mesh-Timestamp` headers using the sender's cached `public_key` from the mesh vault (falling back to the optional `mesh-peer-registry`).
-2. Parses and validates the `[mesh][from:...][to:...][id:...][action:...][reply:...]` envelope.
+2. Parses and validates the `[mesh][from:...][to:...][id:...][action:...][reply:...]` envelope (plus the optional `[session:...]` / `[from_session:...]` tokens from the session-selector cut).
 3. Writes the message to a durable inbox (`/tmp/openclaw-mesh/mesh-inbox.jsonl` by default).
 4. Optionally mirrors the inbound message to `telegram` or `cli`.
-5. Calls `api.runtime.agent.runEmbeddedAgent(...)` so the configured session wakes and processes the turn.
+5. Resolves the real session UUID for the target session key (OpenClaw 2.0 sqlite `session_nodes.current_session_id`), wraps the embedded run in the gateway's independent root-work admission (`runWithGatewayIndependentRootWorkAdmission`), and calls `api.runtime.agent.runEmbeddedAgent(...)` so the configured session wakes and processes the turn.
+6. Mirrors the embedded run's final assistant output to Telegram (when `mirrorOutbound: "telegram"`) instead of auto-replying to the envelope sender — matching Hermes-side behavior.
+
+## OpenClaw 2.0 change set
+
+OpenClaw 2.0 (2026.8.x) moved session storage from JSONL files to a sqlite store (`session_nodes`, `session_windows`). This changed the embedded-run contract in three ways, all handled by the plugin:
+
+1. **Session UUID resolution (writer admission).** The 2.0 runtime's writer admission (`claimAgentSessionWriter`) compares the `sessionId` passed to `runEmbeddedAgent` against the store entry's real session UUID (`session_nodes.current_session_id`). Passing a key-derived id (e.g. `'main'` from `agent:main:main`) now fails with `Session changed before writer admission`. The plugin resolves the real UUID from the store before the run (`resolveSessionIdForRun`), falling back to the key-derived id on pre-2.0 (JSONL-era) stores for backward compatibility.
+
+2. **Key-tolerant fallback (defense-in-depth).** When the stored session id is not UUID-shaped (a legacy JSONL-era row that survived migration), `resolveSessionIdForRun` returns the full session key rather than forcing a UUID into the admission check. This does **not** by itself fix 2.0 admission — the real fix for a key-shaped legacy session is minting a fresh UUID via the runtime's own `createSessionEntryWithTranscript` — but it keeps the plugin from making a bad situation worse on any future key-shaped row.
+
+3. **Root-work admission wrap (the "Gateway is draining" saga).** The 2.0 runtime only admits *subordinate* (root-less) work when the gateway's suspend phase is `accepting` — which is why embedded mesh runs fired fire-and-forget failed intermittently between turns (and why Telegram turns, which always hold a gateway root, never failed). The plugin now wraps every embedded run in `runWithGatewayIndependentRootWorkAdmission`, giving the run its own independent root — the same wrapper the runtime itself uses for delivery-queue drains, heartbeat wakes, and restart recovery. This makes embedded runs reliable between turns, not just during the post-boot accepting window.
+
+### Telegram mirror behavior
+
+Since 0.2.5, embedded-run output is **mirrored to Telegram** (when `mirrorOutbound: "telegram"` is configured) instead of auto-replying to the envelope sender. This matches Hermes-side behavior: the mesh message arrives, the agent processes it in its session, and the visible output lands in the agent's Telegram chat — not as a mesh reply to the sender. The `reply:` envelope field remains respected for delivery receipts.
 
 ## Installation
 
