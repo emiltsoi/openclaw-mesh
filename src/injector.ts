@@ -59,6 +59,18 @@ export function resolveSessionIdForRun(
       "SELECT current_session_id AS sid FROM session_nodes WHERE session_key = ?",
     ).get(sessionKey) as { sid?: string } | undefined;
     if (row && typeof row.sid === "string" && row.sid.length > 0) {
+      // 2026.9: session_nodes may carry a KEY-SHAPED id (JSONL/emts-era rows that
+      // were never re-pointed to a UUID — Kore's agent:main:main -> 'main'). The
+      // 2.0 embedded-run admission expects a UUID-shaped session id and rejects
+      // bare key-shaped ids with a generic "Gateway is draining" error. When the
+      // stored id is NOT uuid-shaped, hand the runtime the full session KEY
+      // instead — the runtime's key-tolerant path (resolveAdmittedRunSessionFile)
+      // resolves by sessionKey the way the channel paths do.
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!UUID_RE.test(row.sid)) {
+        debugLog(`resolveSessionIdForRun: stored session id '${row.sid}' for ${sessionKey} is not uuid-shaped; returning session key for key-tolerant admission`);
+        return sessionKey;
+      }
       debugLog(`resolveSessionIdForRun: resolved ${sessionKey} -> ${row.sid} from session_nodes`);
       return row.sid;
     }
