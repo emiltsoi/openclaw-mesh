@@ -68,6 +68,26 @@ describe("extractMessageText ref", () => {
     });
     assert.equal(text, "[mesh][from:agent0][to:emts][id:123][action:do][reply:yes][ref:thread-1] hello");
   });
+
+  it("preserves session and from_session tokens in canonical position", () => {
+    const text = extractMessageText({
+      envelope: {
+        from: "agent0",
+        to: "emts",
+        id: "123",
+        session: "review",
+        fromSession: "chat",
+        action: "do",
+        reply: "yes",
+        ref: "thread-1",
+      },
+      message: "hello",
+    });
+    assert.equal(
+      text,
+      "[mesh][from:agent0][to:emts][id:123][session:review][from_session:chat][action:do][reply:yes][ref:thread-1] hello",
+    );
+  });
 });
 
 describe("validateTimestamp", () => {

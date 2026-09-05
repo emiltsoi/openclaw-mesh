@@ -33,7 +33,17 @@ export function extractMessageText(payload: any): string {
   if (typeof payload.text === "string") return payload.text;
   if (payload?.envelope) {
     const e = payload.envelope;
-    let header = `[mesh][from:${e.from || ""}][to:${e.to || ""}][id:${e.id || ""}][action:${e.action || "do"}][reply:${e.reply || "no"}]`;
+    let header = `[mesh][from:${e.from || ""}][to:${e.to || ""}][id:${e.id || ""}]`;
+    // Session-selector tokens (0.2.5): emit in canonical order after [id],
+    // before [action], matching discovery.ts/injector.ts. Only when present so
+    // bare envelopes stay byte-identical (backward compat).
+    if (e.session) {
+      header += `[session:${e.session}]`;
+    }
+    if (e.fromSession) {
+      header += `[from_session:${e.fromSession}]`;
+    }
+    header += `[action:${e.action || "do"}][reply:${e.reply || "no"}]`;
     if (e.ref) {
       header += `[ref:${e.ref}]`;
     }
