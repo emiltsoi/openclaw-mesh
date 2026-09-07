@@ -40,42 +40,39 @@ const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
  * falls back to the direct (unwrapped) call so a failed import never kills
  * mesh delivery.
  */
-/**
- * Resolve the openclaw runtime's dist directory by locating the openclaw
- * package the gateway actually runs (via the exports-map-exposed
- * plugin-sdk/runtime subpath), then returning its <pkg>/dist path.
- *
- * Shared by resolveRunWithAdmission and resolvePrepareRunAdmission so both
- * admission resolvers locate the same runtime tree. Returns null when the
- * package or dist dir cannot be found (never throws).
- */
-function resolveRuntimeDistDir(): string | null {
-  try {
-    const require = createRequire(import.meta.url);
-    // Resolve the openclaw package the gateway actually runs. Static imports
-    // from "openclaw/plugin-sdk/..." work in the gateway, so the native ESM
-    // resolver (import.meta.resolve) sees the same package the gateway loaded.
-    // Resolve a path the exports map EXPOSES (plugin-sdk/runtime), then walk
-    // up to the package root (<pkg>/dist/plugin-sdk/runtime.js -> <pkg>).
-    const resolver = (import.meta as any).resolve
-      ? (p: string) => String((import.meta as any).resolve(p)).replace(/^file:\/\//, "")
-      : (p: string) => require.resolve(p);
-    const sdkEntry = resolver("openclaw/plugin-sdk/runtime");
-    // <runtime>/node_modules/openclaw/dist/plugin-sdk/runtime.js
-    const pkgRoot = path.dirname(path.dirname(path.dirname(sdkEntry))); // .../openclaw
-    const distDir = path.join(pkgRoot, "dist");
-    if (!fs.existsSync(distDir)) return null;
-    return distDir;
-  } catch {
-    return null;
-  }
-}
-
 async function resolveRunWithAdmission(runtime: any): Promise<((run: () => Promise<any>, origin: string) => Promise<any>) | null> {
   try {
-    const distDir = resolveRuntimeDistDir();
-    if (!distDir) {
-      debugLog("runWithAdmission: could not resolve openclaw runtime dist; falling back to direct run");
+    // The runtime dir: derive from the api.runtime's own module location.
+    // runtime.agent.resolveAgentWorkspaceDir gives the WORKSPACE, not the
+    // runtime — find the runtime by walking up from the openclaw package we
+    // know is loaded. Use createRequire to resolve 'openclaw/package.json'
+    // from OUR module context — the plugin is installed under the workspace,
+    // but node resolves the symlinked runtime through the gateway's loader.
+    const require = createRequire(import.meta.url);
+    let runtimeRoot: string | null = null;
+    try {
+      // Resolve the openclaw package the gateway actually runs. Static imports
+      // from "openclaw/plugin-sdk/..." work in the gateway, so the native ESM
+      // resolver (import.meta.resolve) sees the same package the gateway loaded.
+      // Resolve a path the exports map EXPOSES (plugin-sdk/runtime), then walk
+      // up to the package root (<pkg>/dist/plugin-sdk/runtime.js -> <pkg>).
+      const resolver = (import.meta as any).resolve
+        ? (p: string) => String((import.meta as any).resolve(p)).replace(/^file:\/\//, "")
+        : (p: string) => require.resolve(p);
+      const sdkEntry = resolver("openclaw/plugin-sdk/runtime");
+      // <runtime>/node_modules/openclaw/dist/plugin-sdk/runtime.js
+      const pkgRoot = path.dirname(path.dirname(path.dirname(sdkEntry))); // .../openclaw
+      runtimeRoot = pkgRoot;
+    } catch {
+      runtimeRoot = null;
+    }
+    if (!runtimeRoot) {
+      debugLog("runWithAdmission: could not resolve openclaw runtime root; falling back to direct run");
+      return null;
+    }
+    const distDir = path.join(runtimeRoot, "dist");
+    if (!fs.existsSync(distDir)) {
+      debugLog(`runWithAdmission: no dist dir at ${distDir}; falling back to direct run`);
       return null;
     }
     const candidates = fs.readdirSync(distDir).filter((f) => /^gateway-work-admission-[A-Za-z0-9_-]+\.js$/.test(f));
@@ -108,89 +105,6 @@ async function resolveRunWithAdmission(runtime: any): Promise<((run: () => Promi
     debugLog(`runWithAdmission: import failed (${e.message || e}); falling back to direct run`);
     return null;
   }
-}
-
-/**
- * Signature of the runtime's `prepareSystemAgentRunAdmission`:
- *   prepareSystemAgentRunAdmission(cfg, runId, agentId, boundary) → prepared
- *   run-admission context object that runEmbeddedAgent consumes internally.
- */
-type PrepareRunAdmissionFn = (cfg: any, runId: string, agentId: string, boundary: string) => any;
-
-/**
- * Resolve + import the runtime's admitted-run-context module and return the
- * `prepareSystemAgentRunAdmission` function.
- *
- * OpenClaw 2.0 embedded-agent runs require a prepared run admission — the
- * runtime's internal resolvePreparedRunAdmission() independently checks the
- * gate, so without a prepared context the run intermittently fails with
- * "Gateway is draining" ~59ms after "run started". The
- * runWithGatewayIndependentRootWorkAdmission wrap (outer admission) is
- * necessary but NOT sufficient — the inner prepared admission must also be
- * supplied to runEmbeddedAgent.
- *
- * Mirrors resolveRunWithAdmission's hardening:
- *  - filename glob (admitted-run-context-*.js) self-heals across runtime bumps
- *  - export-alias scan: the minifier renames exports to single letters between
- *    builds (e.g. `prepareSystemAgentRunAdmission as o`) but keeps the
- *    function's own name — find by value, not alias.
- *
- * Returns null when the module can't be resolved (never throws) — the caller
- * falls back to running without a prepared admission so a failed import never
- * kills mesh delivery.
- */
-async function resolvePrepareRunAdmission(runtime: any): Promise<PrepareRunAdmissionFn | null> {
-  try {
-    const distDir = resolveRuntimeDistDir();
-    if (!distDir) {
-      debugLog("prepareRunAdmission: could not resolve openclaw runtime dist; running without prepared admission");
-      return null;
-    }
-    const candidates = fs.readdirSync(distDir).filter((f) => /^admitted-run-context-[A-Za-z0-9_-]+\.js$/.test(f));
-    if (candidates.length === 0) {
-      debugLog("prepareRunAdmission: admitted-run-context module not found in dist; running without prepared admission");
-      return null;
-    }
-    const modPath = path.join(distDir, candidates[0]);
-    const mod: any = await import(modPath);
-    // Defensive alias resolution: prefer a direct export, else scan by function name.
-    let preparer: any = null;
-    if (typeof mod.prepareSystemAgentRunAdmission === "function") {
-      preparer = mod.prepareSystemAgentRunAdmission;
-    } else {
-      for (const key of Object.keys(mod)) {
-        const candidate = (mod as any)[key];
-        if (typeof candidate === "function" && /prepareSystemAgentRunAdmission/.test(candidate.name || "")) {
-          preparer = candidate;
-          break;
-        }
-      }
-    }
-    if (typeof preparer !== "function") {
-      debugLog("prepareRunAdmission: prepareSystemAgentRunAdmission not found in module exports; running without prepared admission");
-      return null;
-    }
-    debugLog(`prepareRunAdmission: resolved prepareSystemAgentRunAdmission from ${candidates[0]}`);
-    return preparer as PrepareRunAdmissionFn;
-  } catch (e: any) {
-    debugLog(`prepareRunAdmission: import failed (${e.message || e}); running without prepared admission`);
-    return null;
-  }
-}
-
-/**
- * Test-only override for the prepare-run-admission resolver used by
- * injectIntoSession. When set (via __setPrepareRunAdmissionResolverForTest),
- * injectIntoSession calls this instead of resolvePrepareRunAdmission so tests
- * can verify the preparedRunAdmission plumbing without standing up a real
- * openclaw runtime dist tree. Always null in production.
- */
-let prepareRunAdmissionResolverForTest: ((runtime: any) => Promise<PrepareRunAdmissionFn | null>) | null = null;
-
-export function __setPrepareRunAdmissionResolverForTest(
-  fn: ((runtime: any) => Promise<PrepareRunAdmissionFn | null>) | null,
-): void {
-  prepareRunAdmissionResolverForTest = fn;
 }
 
 /**
@@ -375,19 +289,6 @@ export async function injectIntoSession(
   // embedded runs admit reliably BETWEEN gateway turns — not only when the
   // gateway's suspendPhase happens to be 'accepting'.
   const runWithAdmission = await resolveRunWithAdmission(runtime);
-
-  // OpenClaw 2.0: prepare the inner run admission context. The runtime's
-  // internal resolvePreparedRunAdmission() independently checks the gate, so
-  // without a prepared context the run intermittently fails with "Gateway is
-  // draining" ~59ms after start — the outer runWithAdmission wrap is necessary
-  // but NOT sufficient. When the admitted-run-context module can't be resolved
-  // (Kore-era, missing dist file), preparedRunAdmission stays undefined and
-  // the runtime falls back to its legacy path (never breaks mesh delivery).
-  const prepareRunAdmission = await (prepareRunAdmissionResolverForTest ?? resolvePrepareRunAdmission)(runtime);
-  const preparedRunAdmission = prepareRunAdmission
-    ? prepareRunAdmission(globalCfg, runId, targetAgentId, "openclaw-mesh:embedded-run")
-    : undefined;
-
   const runPromise = runtime.agent.runEmbeddedAgent({
     agentId: targetAgentId,
     sessionId,
@@ -404,7 +305,6 @@ export async function injectIntoSession(
     messageTo,
     requireExplicitMessageTarget: false,
     config: globalCfg,
-    preparedRunAdmission,
   }).catch(async (e: any) => {
     const errorText = `⚠️ Mesh run failed: ${e.message || e}\n\nInbound message:\n${messageText}`;
     debugLog(`embedded agent run failed: ${e.message || e}`);
