@@ -19,7 +19,7 @@ import {
   resolvePeer,
   sendToAgent,
 } from "../src/discovery.js";
-import { resolveSessionIdFromKey } from "../src/injector.js";
+import { __setPrepareRunAdmissionResolverForTest, injectIntoSession, resolveSessionIdFromKey } from "../src/injector.js";
 import { resolveTelegramConfig } from "../src/mirror.js";
 import { signMessage, verifyMessage } from "../src/registry.js";
 
@@ -558,6 +558,104 @@ describe("key framing interop (F1)", () => {
       );
     } finally {
       fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// preparedRunAdmission — OpenClaw 2.0 embedded-run inner admission
+// ---------------------------------------------------------------------------
+describe("injectIntoSession preparedRunAdmission", () => {
+  afterEach(() => {
+    __setPrepareRunAdmissionResolverForTest(null);
+  });
+
+  function makeMockRuntime(captured: { params?: any }): any {
+    return {
+      agent: {
+        runEmbeddedAgent(params: any) {
+          captured.params = params;
+          return Promise.resolve({ meta: {} });
+        },
+        resolveAgentWorkspaceDir: () => os.tmpdir(),
+        resolveAgentDir: () => os.tmpdir(),
+        resolveAgentTimeoutMs: () => 30000,
+      },
+    };
+  }
+
+  it("passes preparedRunAdmission to runEmbeddedAgent when the resolver resolves", async () => {
+    const captured: { params?: any; prepArgs?: any[] } = {};
+    const sentinel = { __prepared: true };
+    __setPrepareRunAdmissionResolverForTest(async () => {
+      return (_cfg: any, runId: string, agentId: string, boundary: string) => {
+        captured.prepArgs = [_cfg, runId, agentId, boundary];
+        return sentinel;
+      };
+    });
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-prep-"));
+    try {
+      const inboxFile = path.join(tmp, "inbox.jsonl");
+      const api: any = {
+        registrationMode: "full",
+        registerTool: () => {},
+        on: () => {},
+        resolvePath: undefined,
+        pluginConfig: { inboxPath: inboxFile, mirrorInbound: "none", targetSessionKey: "agent:main:main" },
+        config: {},
+        runtime: makeMockRuntime(captured),
+      };
+      const envelope = parseMeshEnvelope("[mesh][v:1][from:agent0][to:emts][id:prep-1][action:do][reply:yes] hi");
+      assert.ok(envelope);
+      await injectIntoSession(api, "hi", envelope!);
+      // Let the fire-and-forget runPromise's .then settle.
+      await new Promise((r) => setImmediate(r));
+
+      assert.ok(captured.params, "runEmbeddedAgent was called");
+      assert.equal(
+        captured.params.preparedRunAdmission,
+        sentinel,
+        "preparedRunAdmission is the prepared admission context",
+      );
+      assert.ok(captured.prepArgs, "prepareSystemAgentRunAdmission was invoked");
+      assert.equal(captured.prepArgs![1], captured.params.runId, "preparer received the runId");
+      assert.equal(captured.prepArgs![2], captured.params.agentId, "preparer received the agentId");
+      assert.equal(captured.prepArgs![3], "openclaw-mesh:embedded-run", "preparer received the boundary");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("calls runEmbeddedAgent without preparedRunAdmission when resolution fails (null)", async () => {
+    const captured: { params?: any } = {};
+    __setPrepareRunAdmissionResolverForTest(async () => null);
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-prep-fallback-"));
+    try {
+      const inboxFile = path.join(tmp, "inbox.jsonl");
+      const api: any = {
+        registrationMode: "full",
+        registerTool: () => {},
+        on: () => {},
+        resolvePath: undefined,
+        pluginConfig: { inboxPath: inboxFile, mirrorInbound: "none", targetSessionKey: "agent:main:main" },
+        config: {},
+        runtime: makeMockRuntime(captured),
+      };
+      const envelope = parseMeshEnvelope("[mesh][v:1][from:agent0][to:emts][id:prep-2][action:do][reply:yes] hi");
+      assert.ok(envelope);
+      await injectIntoSession(api, "hi", envelope!);
+      await new Promise((r) => setImmediate(r));
+
+      assert.ok(captured.params, "runEmbeddedAgent was called (fallback path, no throw)");
+      assert.equal(
+        captured.params.preparedRunAdmission,
+        undefined,
+        "preparedRunAdmission is undefined on fallback",
+      );
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 });
