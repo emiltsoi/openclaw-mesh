@@ -289,7 +289,12 @@ export async function injectIntoSession(
   // embedded runs admit reliably BETWEEN gateway turns — not only when the
   // gateway's suspendPhase happens to be 'accepting'.
   const runWithAdmission = await resolveRunWithAdmission(runtime);
-  const runPromise = runtime.agent.runEmbeddedAgent({
+
+  // runEmbeddedAgent call params — single source, identical in both branches
+  // below. NOTE: do NOT add a preparedRunAdmission field here — the plugin
+  // adapter (runPluginEmbeddedAgent) forbids caller-supplied host run
+  // authority and throws "cannot supply host run authority".
+  const embeddedRunParams = {
     agentId: targetAgentId,
     sessionId,
     sessionKey: targetSessionKey,
@@ -305,97 +310,111 @@ export async function injectIntoSession(
     messageTo,
     requireExplicitMessageTarget: false,
     config: globalCfg,
-  }).catch(async (e: any) => {
-    const errorText = `⚠️ Mesh run failed: ${e.message || e}\n\nInbound message:\n${messageText}`;
-    debugLog(`embedded agent run failed: ${e.message || e}`);
+  };
 
-    // Best-effort DSN to the sender so they know injection failed.
-    try {
-      const routingAgent = pluginCfg.targetAgentId || "emts";
-      await sendDeliveryError(
-        envelope.to,
-        envelope.from,
-        envelope.id,
-        "injection-failed",
-        envelope.from,
-        envelope.to,
-        envelope.ref,
-        meshApi,
-      );
-    } catch (dsnErr: any) {
-      debugLog(`embedded agent run failed: DSN could not be sent: ${dsnErr.message || dsnErr}`);
-    }
+  // Run the embedded agent and attach the in-chain error handling + output
+  // mirror. Extracted so the wrapped and unwrapped paths share the SAME call
+  // + chain — the runEmbeddedAgent CALL happens here, inside whichever
+  // context the caller invokes this from (inside the wrapper's callback, or
+  // directly when the wrapper is unavailable).
+  const runEmbeddedWithChain = (): Promise<void> =>
+    runtime.agent.runEmbeddedAgent(embeddedRunParams)
+      .catch(async (e: any) => {
+        const errorText = `⚠️ Mesh run failed: ${e.message || e}\n\nInbound message:\n${messageText}`;
+        debugLog(`embedded agent run failed: ${e.message || e}`);
 
-    // Fallback 1: mirror the failure so it is visible.
-    await mirrorMessage(pluginCfg.mirrorInbound, errorText, api);
-
-    // Fallback 2: append an error record to the durable inbox.
-    try {
-      fs.appendFileSync(inboxDir, JSON.stringify({ ts: Date.now(), error: e.message || String(e), sessionKey: targetSessionKey, text }) + "\n");
-    } catch (err: any) {
-      debugLog(`inbox error write failed: ${err.message || err}`);
-    }
-  }).then(async (runResult: any) => {
-    // Surface the embedded run's output to Telegram (Hermes-parity):
-    // a direct Telegram turn streams to Emil natively, but a mesh-injected
-    // run (messageChannel="mesh") has no output surface — the work happens
-    // silently unless the agent explicitly called mesh_send. When she did
-    // NOT reply via a messaging tool, mirror her final output to the
-    // configured outbound surface (her Telegram bot → Emil's chat) so he
-    // sees what she did — reply:no work is done, not invisible.
-    try {
-      if (!runResult) return;
-      // If the agent already sent via a messaging tool (mesh_send/telegram),
-      // that call's own mirror already surfaced her words — do not double-send.
-      const alreadyReplied = runResult.didDeliverSourceReplyViaMessageTool === true
-        || runResult.didSendViaMessagingTool === true;
-      if (alreadyReplied) {
-        debugLog("embedded run telegram-mirror skipped: agent already replied via messaging tool");
-        return;
-      }
-      // Extract the assistant's final text output from the run result.
-      // Mesh-injected runs have no delivery channel, so `payloads` stays
-      // empty — the text lives in `meta.finalAssistantVisibleText`.
-      const runMeta: any = runResult.meta || {};
-      let finalText = String(
-        runMeta.finalAssistantVisibleText
-        || runMeta.finalAssistantRawText
-        || ""
-      ).trim();
-      if (!finalText) {
-        const payloadTexts: string[] = (runResult.payloads || [])
-          .filter((p: any) => typeof p?.text === "string" && !p.isError && !p.isReasoning)
-          .map((p: any) => p.text);
-        if (payloadTexts.length === 0) {
-          debugLog("embedded run telegram-mirror skipped: no deliverable text output");
-          return;
+        // Best-effort DSN to the sender so they know injection failed.
+        try {
+          const routingAgent = pluginCfg.targetAgentId || "emts";
+          await sendDeliveryError(
+            envelope.to,
+            envelope.from,
+            envelope.id,
+            "injection-failed",
+            envelope.from,
+            envelope.to,
+            envelope.ref,
+            meshApi,
+          );
+        } catch (dsnErr: any) {
+          debugLog(`embedded agent run failed: DSN could not be sent: ${dsnErr.message || dsnErr}`);
         }
-        finalText = payloadTexts.join("\n").trim();
-      }
-      const mirrorTarget = pluginCfg.mirrorOutbound || pluginCfg.mirrorInbound;
-      if (!mirrorTarget || mirrorTarget === "none") {
-        debugLog("embedded run telegram-mirror skipped: no mirror target configured");
-        return;
-      }
-      const outboundDisplay = `📤 [${pluginCfg.routingAgent || "mesh"} work done]\n\n${finalText.slice(0, 6000)}`;
-      await mirrorMessage(mirrorTarget, outboundDisplay, api);
-      debugLog(`embedded run output mirrored to ${mirrorTarget} (${finalText.length} chars)`);
-    } catch (e: any) {
-      debugLog(`embedded run telegram-mirror failed: ${e.message || e}`);
-    }
-  });
+
+        // Fallback 1: mirror the failure so it is visible.
+        await mirrorMessage(pluginCfg.mirrorInbound, errorText, api);
+
+        // Fallback 2: append an error record to the durable inbox.
+        try {
+          fs.appendFileSync(inboxDir, JSON.stringify({ ts: Date.now(), error: e.message || String(e), sessionKey: targetSessionKey, text }) + "\n");
+        } catch (err: any) {
+          debugLog(`inbox error write failed: ${err.message || err}`);
+        }
+      })
+      .then(async (runResult: any) => {
+        // Surface the embedded run's output to Telegram (Hermes-parity):
+        // a direct Telegram turn streams to Emil natively, but a mesh-injected
+        // run (messageChannel="mesh") has no output surface — the work happens
+        // silently unless the agent explicitly called mesh_send. When she did
+        // NOT reply via a messaging tool, mirror her final output to the
+        // configured outbound surface (her Telegram bot → Emil's chat) so he
+        // sees what she did — reply:no work is done, not invisible.
+        try {
+          if (!runResult) return;
+          // If the agent already sent via a messaging tool (mesh_send/telegram),
+          // that call's own mirror already surfaced her words — do not double-send.
+          const alreadyReplied = runResult.didDeliverSourceReplyViaMessageTool === true
+            || runResult.didSendViaMessagingTool === true;
+          if (alreadyReplied) {
+            debugLog("embedded run telegram-mirror skipped: agent already replied via messaging tool");
+            return;
+          }
+          // Extract the assistant's final text output from the run result.
+          // Mesh-injected runs have no delivery channel, so `payloads` stays
+          // empty — the text lives in `meta.finalAssistantVisibleText`.
+          const runMeta: any = runResult.meta || {};
+          let finalText = String(
+            runMeta.finalAssistantVisibleText
+            || runMeta.finalAssistantRawText
+            || ""
+          ).trim();
+          if (!finalText) {
+            const payloadTexts: string[] = (runResult.payloads || [])
+              .filter((p: any) => typeof p?.text === "string" && !p.isError && !p.isReasoning)
+              .map((p: any) => p.text);
+            if (payloadTexts.length === 0) {
+              debugLog("embedded run telegram-mirror skipped: no deliverable text output");
+              return;
+            }
+            finalText = payloadTexts.join("\n").trim();
+          }
+          const mirrorTarget = pluginCfg.mirrorOutbound || pluginCfg.mirrorInbound;
+          if (!mirrorTarget || mirrorTarget === "none") {
+            debugLog("embedded run telegram-mirror skipped: no mirror target configured");
+            return;
+          }
+          const outboundDisplay = `📤 [${pluginCfg.routingAgent || "mesh"} work done]\n\n${finalText.slice(0, 6000)}`;
+          await mirrorMessage(mirrorTarget, outboundDisplay, api);
+          debugLog(`embedded run output mirrored to ${mirrorTarget} (${finalText.length} chars)`);
+        } catch (e: any) {
+          debugLog(`embedded run telegram-mirror failed: ${e.message || e}`);
+        }
+      });
 
   // Wrap the entire chain in the runtime's independent root-work admission so
-  // embedded runs admit reliably between gateway turns. If the wrapper could
-  // not be resolved, run unwrapped (never break mesh delivery).
+  // embedded runs admit reliably between gateway turns. The runEmbeddedAgent
+  // CALL happens INSIDE the wrapper's callback so the admission + enqueue
+  // chain runs under the wrapper's independent root — not the parent's
+  // (already-released) root, which the command-lane subordinate gate rejects
+  // with "Gateway is draining". If the wrapper could not be resolved, run
+  // unwrapped (never break mesh delivery).
   if (runWithAdmission) {
     runWithAdmission(async () => {
-      await runPromise;
+      await runEmbeddedWithChain();
     }, "openclaw-mesh:embedded-run").catch((e: any) => {
       debugLog(`embedded run admission wrap failed: ${e.message || e}`);
     });
   } else {
-    runPromise.catch(() => { /* errors already handled in-chain */ });
+    runEmbeddedWithChain().catch(() => { /* errors already handled in-chain */ });
   }
 
   debugLog("embedded agent run started");

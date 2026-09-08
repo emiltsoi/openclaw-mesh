@@ -6,6 +6,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { dump as yamlDump } from "js-yaml";
 import { parseMeshEnvelope, stripEnvelope } from "../src/envelope.js";
 import {
@@ -19,7 +20,7 @@ import {
   resolvePeer,
   sendToAgent,
 } from "../src/discovery.js";
-import { resolveSessionIdFromKey } from "../src/injector.js";
+import { injectIntoSession, resolveSessionIdFromKey } from "../src/injector.js";
 import { resolveTelegramConfig } from "../src/mirror.js";
 import { signMessage, verifyMessage } from "../src/registry.js";
 
@@ -558,6 +559,147 @@ describe("key framing interop (F1)", () => {
       );
     } finally {
       fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// injector/runEmbeddedAgent — the runEmbeddedAgent CALL must happen INSIDE
+// the admission wrapper's callback, not before it.
+// ---------------------------------------------------------------------------
+describe("injector/runEmbeddedAgent call ordering", () => {
+  // Regression: src/injector.ts previously called runEmbeddedAgent in the
+  // parent's (already-released) root and then handed the resulting PROMISE to
+  // the independent-root wrapper. The admission + enqueue chain therefore ran
+  // under the released root → the command-lane subordinate gate saw
+  // current.released === true → "Gateway is draining" (intermittently: fast
+  // lanes admitted before the parent released; slow lanes rejected after).
+  //
+  // The fix moves the runEmbeddedAgent CALL inside the wrapper's callback. We
+  // assert the ordering via a spy: runEmbeddedAgent must NOT be called before
+  // the wrapper's callback is invoked. With the buggy ordering the spy is
+  // called before the wrapper runs (call count > 0 at wrapper-entry); with the
+  // fix the spy is called only inside the wrapper's callback (call count === 0
+  // at wrapper-entry).
+  //
+  // To force the runWithAdmission branch, we drop a fake
+  // gateway-work-admission-*.js module into the resolved openclaw dist dir —
+  // the same discovery path resolveRunWithAdmission uses (glob + dynamic
+  // import). The fake delegates to a per-test global hook so we can record
+  // wrapper-entry and control callback invocation.
+
+  const FAKE_MOD_SRC = `\
+export function runWithGatewayIndependentRootWorkAdmission(run, origin) {
+  const hook = globalThis.__openclawMeshFakeAdmission;
+  if (typeof hook === "function") return hook(run, origin);
+  return Promise.resolve().then(() => run());
+}
+`;
+
+  const require = createRequire(import.meta.url);
+  function openclawDistDir(): string {
+    const resolver = (import.meta as any).resolve
+      ? (p: string) => String((import.meta as any).resolve(p)).replace(/^file:\/\//, "")
+      : (p: string) => require.resolve(p);
+    const sdkEntry = resolver("openclaw/plugin-sdk/runtime");
+    // <runtime>/node_modules/openclaw/dist/plugin-sdk/runtime.js -> .../openclaw
+    const pkgRoot = path.dirname(path.dirname(path.dirname(sdkEntry)));
+    return path.join(pkgRoot, "dist");
+  }
+
+  it("calls runEmbeddedAgent INSIDE the admission wrapper's callback (not before)", async () => {
+    const distDir = openclawDistDir();
+    const fakeModPath = path.join(distDir, "gateway-work-admission-regression-fake.js");
+    const fakeExisted = fs.existsSync(fakeModPath);
+    fs.mkdirSync(distDir, { recursive: true });
+    fs.writeFileSync(fakeModPath, FAKE_MOD_SRC);
+
+    let runEmbeddedAgentCalls = 0;
+    let callsAtWrapperEntry = -1;
+    let wrapperEntered = false;
+    (globalThis as any).__openclawMeshFakeAdmission = (run: () => Promise<any>, _origin: string) => {
+      wrapperEntered = true;
+      callsAtWrapperEntry = runEmbeddedAgentCalls;
+      // Invoke the callback (which should call runEmbeddedAgent) on a
+      // microtask, matching how a real wrapper establishes its root then runs.
+      return Promise.resolve().then(() => run());
+    };
+
+    const inboxTmp = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-order-"));
+    const inboxFile = path.join(inboxTmp, "inbox.jsonl");
+    const api: any = {
+      pluginConfig: { inboxPath: inboxFile, mirrorInbound: "none", targetSessionKey: "agent:main:main" },
+      config: {},
+      runtime: {
+        agent: {
+          runEmbeddedAgent: async (_params: any) => {
+            runEmbeddedAgentCalls++;
+            return { meta: {}, payloads: [] };
+          },
+          resolveAgentWorkspaceDir: () => inboxTmp,
+          resolveAgentDir: () => inboxTmp,
+          resolveAgentTimeoutMs: () => 1000,
+        },
+      },
+    };
+
+    const envelope = parseMeshEnvelope("[mesh][v:1][from:agent0][to:emts][id:ord-1][action:do][reply:yes] hi");
+    assert.ok(envelope);
+
+    try {
+      await injectIntoSession(api, "hi", envelope!);
+      // injectIntoSession is fire-and-forget for the wrapped run; let the
+      // wrapper callback + chain settle on the event loop.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      assert.equal(wrapperEntered, true, "admission wrapper was invoked");
+      assert.equal(
+        callsAtWrapperEntry,
+        0,
+        "runEmbeddedAgent must NOT be called before the wrapper's callback runs (call-inside-wrapper, not call-then-wrap-promise)",
+      );
+      assert.equal(runEmbeddedAgentCalls, 1, "runEmbeddedAgent called exactly once, inside the wrapper");
+    } finally {
+      if (!fakeExisted) fs.rmSync(fakeModPath, { force: true });
+      delete (globalThis as any).__openclawMeshFakeAdmission;
+      fs.rmSync(inboxTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to a direct (unwrapped) call when the admission wrapper is unavailable", async () => {
+    // No fake admission module present → resolveRunWithAdmission returns null
+    // → the else branch runs runEmbeddedAgent directly. Mesh delivery must
+    // still work (never break mesh delivery).
+    const inboxTmp = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-direct-"));
+    const inboxFile = path.join(inboxTmp, "inbox.jsonl");
+    let runEmbeddedAgentCalls = 0;
+    const api: any = {
+      pluginConfig: { inboxPath: inboxFile, mirrorInbound: "none", targetSessionKey: "agent:main:main" },
+      config: {},
+      runtime: {
+        agent: {
+          runEmbeddedAgent: async (_params: any) => {
+            runEmbeddedAgentCalls++;
+            return { meta: {}, payloads: [] };
+          },
+          resolveAgentWorkspaceDir: () => inboxTmp,
+          resolveAgentDir: () => inboxTmp,
+          resolveAgentTimeoutMs: () => 1000,
+        },
+      },
+    };
+
+    const envelope = parseMeshEnvelope("[mesh][v:1][from:agent0][to:emts][id:ord-2][action:do][reply:yes] hi");
+    assert.ok(envelope);
+
+    try {
+      await injectIntoSession(api, "hi", envelope!);
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      assert.equal(runEmbeddedAgentCalls, 1, "runEmbeddedAgent called once via the direct fallback path");
+    } finally {
+      fs.rmSync(inboxTmp, { recursive: true, force: true });
     }
   });
 });
