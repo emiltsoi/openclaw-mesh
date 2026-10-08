@@ -1068,7 +1068,9 @@ describe("U17 key path sanitization", () => {
 // ---------------------------------------------------------------------------
 describe("U18 parametrize outbox dir", () => {
   const ENV = "OPENCLAW_MESH_OUTBOX_DIR";
+  const STATE = "OPENCLAW_STATE_DIR";
   const saved = process.env[ENV];
+  const savedState = process.env[STATE];
 
   it("U18/AC-18.1: env override honored", () => {
     process.env[ENV] = "/tmp/oc-outbox-test";
@@ -1081,13 +1083,31 @@ describe("U18 parametrize outbox dir", () => {
     }
   });
 
-  it("U18/AC-18.2: default unchanged when nothing overrides", () => {
+  it("U18/AC-18.2: neutral default when nothing overrides", () => {
     delete process.env[ENV];
+    delete process.env[STATE];
     try {
       assert.equal(resolveOutboxDir({}), DEFAULT_OUTBOX_DIR);
+      // the default must never name a specific agent
+      assert.ok(!/workspaces[\\/][a-z0-9_-]+[\\/]mesh/.test(DEFAULT_OUTBOX_DIR), DEFAULT_OUTBOX_DIR);
     } finally {
       if (saved === undefined) delete process.env[ENV];
       else process.env[ENV] = saved;
+      if (savedState === undefined) delete process.env[STATE];
+      else process.env[STATE] = savedState;
+    }
+  });
+
+  it("U18/AC-18.3: per-agent state dir wins over the neutral default", () => {
+    delete process.env[ENV];
+    process.env[STATE] = path.join(path.sep, "tmp", "oc-state-kore");
+    try {
+      assert.equal(resolveOutboxDir({}), path.join(path.sep, "tmp", "oc-state-kore", "mesh", "outbox"));
+      // an explicit config still outranks the state dir
+      assert.equal(resolveOutboxDir({ outboxDir: "/cfg/outbox" }), "/cfg/outbox");
+    } finally {
+      if (savedState === undefined) delete process.env[STATE];
+      else process.env[STATE] = savedState;
     }
   });
 });

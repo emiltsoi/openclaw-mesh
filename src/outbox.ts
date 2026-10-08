@@ -6,12 +6,19 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createDebugLogger } from "./logging.js";
 
 const debugLog = createDebugLogger();
 
-export const DEFAULT_OUTBOX_DIR = "/home/emil/.openclaw/workspaces/kore/mesh/outbox";
+/**
+ * Neutral homedir fallback, used only when neither the plugin config, the
+ * OPENCLAW_MESH_OUTBOX_DIR override, nor OPENCLAW_STATE_DIR is available.
+ * It never names a specific agent (the previous hardcoded `/…/kore/` default
+ * misrouted every agent's failed sends into one agent's workspace).
+ */
+export const DEFAULT_OUTBOX_DIR = path.join(os.homedir(), ".openclaw", "state", "mesh", "outbox");
 
 export interface OutboxEntry {
   direction: "send" | "receive";
@@ -33,7 +40,12 @@ function todayFileName(): string {
 }
 
 export function resolveOutboxDir(pluginCfg: { outboxDir?: string }): string {
-  return pluginCfg.outboxDir || process.env.OPENCLAW_MESH_OUTBOX_DIR || DEFAULT_OUTBOX_DIR;
+  if (pluginCfg.outboxDir) return pluginCfg.outboxDir;
+  if (process.env.OPENCLAW_MESH_OUTBOX_DIR) return process.env.OPENCLAW_MESH_OUTBOX_DIR;
+  // Per-agent state dir: the correct default, so a failed send lands in the
+  // SENDER's own workspace, never another agent's.
+  if (process.env.OPENCLAW_STATE_DIR) return path.join(process.env.OPENCLAW_STATE_DIR, "mesh", "outbox");
+  return DEFAULT_OUTBOX_DIR;
 }
 
 export function appendToOutbox(entry: OutboxEntry, outboxDir = DEFAULT_OUTBOX_DIR): void {
