@@ -418,7 +418,7 @@ export async function sendToAgent(
   isDsn = false,
   session?: string,
   fromSession?: string,
-): Promise<{ ok: boolean; status?: number; error?: string; delivery_id?: string; text?: string }> {
+): Promise<{ ok: boolean; status?: number; error?: string; delivery_id?: string; text?: string; duplicate?: boolean }> {
   const webhookUrl = peer.webhook_url || peer.transports?.hermes_webhook?.url || "";
   if (!webhookUrl) return { ok: false, error: "peer has no hermes_webhook url" };
 
@@ -492,6 +492,24 @@ export async function sendToAgent(
       }
       await release();
 
+      // 409 replay-detected on our OWN send means an earlier attempt of this
+      // same envelope id already landed and was processed — the response was
+      // lost in transit. That is NOT a delivery failure: the receiver is
+      // correctly refusing a second injection, so retrying again or falling
+      // back to the outbox would only duplicate the message (the very thing
+      // the replay window exists to prevent). Treat it as delivered.
+      if (response.status === 409) {
+        let replayReason: string | undefined;
+        try {
+          replayReason = JSON.parse(bodyText)?.reason;
+        } catch {
+          // non-JSON body
+        }
+        if (replayReason === "replay-detected") {
+          debugLog(`sendToAgent: HTTP 409 replay-detected for id ${id && id.trim() ? id : "<auto>"} — an earlier attempt already landed (response lost); treating as delivered`);
+          return { ok: true, status: 409, duplicate: true, delivery_id: deliveryId, text: payload.text };
+        }
+      }
       if (!response.ok) {
         lastError = new Error(`webhook returned HTTP ${response.status}: ${bodyText.slice(0, 200)}`);
       } else {

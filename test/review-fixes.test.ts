@@ -1200,3 +1200,114 @@ describe("U20 register input validation", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// U21 — 409 replay-detected on our OWN send means "already delivered"
+// ---------------------------------------------------------------------------
+// The replay window correctly refuses a second injection of an envelope id it
+// has already processed (U6). But the sender's own retry loop re-POSTs the
+// IDENTICAL signed body/id, so when attempt 1 lands and its response is lost,
+// attempt 2 looks byte-identical to an attack and draws a 409. The receiver is
+// right; the sender must read that 409 as "my earlier attempt landed", not as a
+// failure — otherwise it retries further and/or writes a phantom outbox entry,
+// and the operator's reflex is to resend, duplicating the message.
+describe("U21 duplicate-suppressed delivery", () => {
+  it("U21/AC-21.1: 409 replay-detected → ok:true, duplicate:true, no outbox, no retry", async () => {
+    const bodies: any[] = [];
+    const server = await startServer((req, res, body) => {
+      bodies.push({ method: req.method, url: req.url, body });
+      res.writeHead(409, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "rejected", reason: "replay-detected" }));
+    });
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-dup-"));
+    try {
+      const vaultRoot = path.join(tmp, "mesh", "agents");
+      const agent0Dir = path.join(vaultRoot, "agent0");
+      fs.mkdirSync(agent0Dir, { recursive: true });
+      fs.writeFileSync(path.join(agent0Dir, "identity.yaml"), yamlDump({
+        id: "agent0",
+        allow_loopback: true,
+        transports: { hermes_webhook: { url: `${server.url}/mesh/receive`, auth: { public_key: "" } } },
+      }));
+      const outboxDir = path.join(tmp, "outbox");
+      const peer = resolvePeer(vaultRoot, "agent0")!;
+      const extra = { privateKeyPath: path.join(tmp, "k.pem"), outboxDir, deliveryRetries: 3, deliveryBackoffMs: 0 };
+      const result = await sendToAgent("emts", peer, "ack", "info", "no", "mesh-ack-1", { pluginConfig: extra });
+      assert.equal(result.ok, true, "409 replay-detected must not be reported as a failure");
+      assert.equal(result.duplicate, true);
+      assert.equal(result.status, 409);
+      assert.equal(bodies.length, 1, "no further attempts after a duplicate-suppressed response");
+      assert.equal(listOutbox(outboxDir).length, 0, "a duplicate is not written to the outbox");
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("U21/AC-21.2: non-replay 409 is still a failure (discriminator)", async () => {
+    const bodies: any[] = [];
+    const server = await startServer((req, res, body) => {
+      bodies.push({ method: req.method, url: req.url, body });
+      res.writeHead(409, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "conflict", reason: "some-other-conflict" }));
+    });
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-dup-neg-"));
+    try {
+      const vaultRoot = path.join(tmp, "mesh", "agents");
+      const agent0Dir = path.join(vaultRoot, "agent0");
+      fs.mkdirSync(agent0Dir, { recursive: true });
+      fs.writeFileSync(path.join(agent0Dir, "identity.yaml"), yamlDump({
+        id: "agent0",
+        allow_loopback: true,
+        transports: { hermes_webhook: { url: `${server.url}/mesh/receive`, auth: { public_key: "" } } },
+      }));
+      const outboxDir = path.join(tmp, "outbox");
+      const peer = resolvePeer(vaultRoot, "agent0")!;
+      const extra = { privateKeyPath: path.join(tmp, "k.pem"), outboxDir, deliveryRetries: 3, deliveryBackoffMs: 0 };
+      const result = await sendToAgent("emts", peer, "hi", "do", "yes", "x-1", { pluginConfig: extra });
+      assert.equal(result.ok, false, "a 409 with an unrelated reason is not a duplicate");
+      assert.equal(result.duplicate, undefined);
+      assert.equal(bodies.length, 3, "all retry attempts used for a genuine failure");
+      assert.equal(listOutbox(outboxDir).length, 1, "genuine failure is written to the outbox");
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("U21/AC-21.3: attempt-1 lost (503) then attempt-2 409 → ok:true, no outbox", async () => {
+    let n = 0;
+    const server = await startServer((req, res, _body) => {
+      n++;
+      if (n === 1) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "error" }));
+        return;
+      }
+      res.writeHead(409, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "rejected", reason: "replay-detected" }));
+    });
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-dup-retry-"));
+    try {
+      const vaultRoot = path.join(tmp, "mesh", "agents");
+      const agent0Dir = path.join(vaultRoot, "agent0");
+      fs.mkdirSync(agent0Dir, { recursive: true });
+      fs.writeFileSync(path.join(agent0Dir, "identity.yaml"), yamlDump({
+        id: "agent0",
+        allow_loopback: true,
+        transports: { hermes_webhook: { url: `${server.url}/mesh/receive`, auth: { public_key: "" } } },
+      }));
+      const outboxDir = path.join(tmp, "outbox");
+      const peer = resolvePeer(vaultRoot, "agent0")!;
+      const extra = { privateKeyPath: path.join(tmp, "k.pem"), outboxDir, deliveryRetries: 3, deliveryBackoffMs: 0 };
+      const result = await sendToAgent("emts", peer, "reply text", "do", "yes", "t-1", { pluginConfig: extra });
+      assert.equal(result.ok, true, "the 409 on retry proves attempt 1 already landed");
+      assert.equal(result.duplicate, true);
+      assert.equal(n, 2, "one failed attempt, one duplicate-suppressed attempt");
+      assert.equal(listOutbox(outboxDir).length, 0, "no phantom outbox entry for a delivered message");
+    } finally {
+      await server.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
