@@ -33,6 +33,7 @@ import {
   deregisterPeerOnRegistry,
   getRegistryUrl,
   listPeersFromRegistry,
+  loadExistingKeyPair,
   loadOrGenerateKeyPair,
   registerPeerOnRegistry,
   resolveMeshExtra,
@@ -649,9 +650,33 @@ export function registerAgent(
   const a2aUrl = options.a2a_url || baseUrl;
   const webhookUrl = options.webhook_url || `${baseUrl}/plugins/openclaw-mesh/webhook`;
 
-  const agentBaseName = normalizeAgentName(options.a2a_url ? new URL(a2aUrl).hostname : agentName) || agentName;
+  // Key-trap guard (2026-10-09, michi's catch at her Mac cutover; mirror of
+  // hermes-mesh f01ffd6): registration must never silently mint a new keypair
+  // over an existing identity — that rotates the agent's key and breaks every
+  // peer holding the old one. Load the existing local keypair when one exists;
+  // REFUSE when an identity exists but its keypair is missing; generate only
+  // for a brand-new agent (the legitimate bootstrap path). The key is selected
+  // by AGENT name, never by URL hostname: signing (sendToAgent) uses the
+  // agent-named key, and a hostname-derived name is exactly what minted a
+  // fresh key over michi's vault key when she re-registered with her new URL.
   if (!options.public_key) {
-    publicPem = loadOrGenerateKeyPair(agentBaseName, options as any).publicPem;
+    let existingKeyPair: { privatePem: string; publicPem: string } | null = null;
+    try {
+      existingKeyPair = loadExistingKeyPair(agentName, options as any);
+    } catch (e: any) {
+      throw new Error(
+        `registerAgent refused: keypair for '${agentName}' exists but is unreadable (${e.message || e}); restore it or pass public_key explicitly`,
+      );
+    }
+    if (existingKeyPair) {
+      publicPem = existingKeyPair.publicPem;
+    } else if (fs.existsSync(yamlPath)) {
+      throw new Error(
+        `registerAgent refused: agent '${agentName}' has an existing mesh identity but no local keypair — refusing to generate one (that would silently rotate the agent's key). Carry the keypair first, or pass public_key explicitly.`,
+      );
+    } else {
+      publicPem = loadOrGenerateKeyPair(agentName, options as any).publicPem;
+    }
   }
 
   const identity: any = {

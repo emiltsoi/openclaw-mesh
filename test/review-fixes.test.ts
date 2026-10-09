@@ -1311,3 +1311,99 @@ describe("U21 duplicate-suppressed delivery", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// U22 — key-trap guard: never mint a keypair over an existing identity
+// ---------------------------------------------------------------------------
+// michi's catch, 2026-10-09 (her Mac cutover): mesh_register with an explicit
+// a2a_url but no public_key derived the key NAME from the URL hostname; that
+// file was absent on her new host, so the code GENERATED a fresh keypair and
+// wrote its public key into the vault — a silent identity rotation that breaks
+// every peer holding the old key. Mirror of hermes-mesh f01ffd6: load the
+// existing local keypair; REFUSE when an identity exists but its keypair is
+// missing; generate only for a brand-new agent (the legitimate bootstrap).
+describe("U22 key-trap guard", () => {
+  function withTempHome<T>(fn: (tmp: string) => T): T {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-kt-"));
+    const original = process.env.HOME;
+    process.env.HOME = tmp;
+    try {
+      return fn(tmp);
+    } finally {
+      if (original !== undefined) process.env.HOME = original;
+      else delete process.env.HOME;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  it("U22/AC-22.1: brand-new agent, no keypair → generates (bootstrap)", () => {
+    withTempHome((tmp) => {
+      const vaultRoot = path.join(tmp, "vault", "agents");
+      fs.mkdirSync(vaultRoot, { recursive: true });
+      const r = registerAgent(vaultRoot, "fresh", "http://127.0.0.1:18860", {});
+      assert.ok(r.public_key.includes("BEGIN PUBLIC KEY"));
+      assert.ok(fs.existsSync(path.join(tmp, ".mesh", "keys", "fresh.pem")), "bootstrap minted the agent-named key");
+    });
+  });
+
+  it("U22/AC-22.2: existing identity + missing keypair → REFUSED, no mint, no write", () => {
+    withTempHome((tmp) => {
+      const vaultRoot = path.join(tmp, "vault", "agents");
+      fs.mkdirSync(vaultRoot, { recursive: true });
+      // seed an identity WITHOUT a local keypair (explicit public_key path)
+      const { publicKey } = generateKeyPair();
+      const seeded = registerAgent(vaultRoot, "victim", "http://127.0.0.1:18860", { public_key: publicKey });
+      const before = fs.readFileSync(seeded.path, "utf-8");
+      assert.throws(
+        () => registerAgent(vaultRoot, "victim", "http://127.0.0.1:18860", {}),
+        /existing mesh identity but no local keypair/,
+      );
+      assert.ok(!fs.existsSync(path.join(tmp, ".mesh", "keys", "victim.pem")), "refusal did not mint a key");
+      assert.equal(fs.readFileSync(seeded.path, "utf-8"), before, "identity untouched");
+    });
+  });
+
+  it("U22/AC-22.3: re-register loads the existing keypair — pubkey stable, URL updated", () => {
+    withTempHome((tmp) => {
+      const vaultRoot = path.join(tmp, "vault", "agents");
+      fs.mkdirSync(vaultRoot, { recursive: true });
+      const first = registerAgent(vaultRoot, "steady", "http://127.0.0.1:18870", {});
+      const keyPath = path.join(tmp, ".mesh", "keys", "steady.pem");
+      const keyBefore = fs.readFileSync(keyPath, "utf-8");
+      const second = registerAgent(vaultRoot, "steady", "http://127.0.0.1:18870", { a2a_url: "http://127.0.0.1:18899" });
+      assert.equal(second.public_key, first.public_key, "pubkey stable across re-register");
+      assert.equal(fs.readFileSync(keyPath, "utf-8"), keyBefore, "key file untouched");
+      const peer = resolvePeer(vaultRoot, "steady")!;
+      assert.equal(peer.a2a_url, "http://127.0.0.1:18899", "URL updated");
+    });
+  });
+
+  it("U22/AC-22.4: delete key then re-register → REFUSED, no re-mint", () => {
+    withTempHome((tmp) => {
+      const vaultRoot = path.join(tmp, "vault", "agents");
+      fs.mkdirSync(vaultRoot, { recursive: true });
+      const r = registerAgent(vaultRoot, "gone", "http://127.0.0.1:18860", {});
+      const before = fs.readFileSync(r.path, "utf-8");
+      fs.rmSync(path.join(tmp, ".mesh", "keys", "gone.pem"));
+      assert.throws(
+        () => registerAgent(vaultRoot, "gone", "http://127.0.0.1:18860", {}),
+        /existing mesh identity but no local keypair/,
+      );
+      assert.ok(!fs.existsSync(path.join(tmp, ".mesh", "keys", "gone.pem")), "no re-mint after key loss");
+      assert.equal(fs.readFileSync(r.path, "utf-8"), before, "identity untouched");
+    });
+  });
+
+  it("U22/AC-22.5: a2a_url cannot switch key identity (michi replay)", () => {
+    withTempHome((tmp) => {
+      const vaultRoot = path.join(tmp, "vault", "agents");
+      fs.mkdirSync(vaultRoot, { recursive: true });
+      const first = registerAgent(vaultRoot, "michi", "http://127.0.0.1:18870", {});
+      // re-register with the NEW URL — pre-fix this derived key name
+      // "192.168.1.79", minted a fresh keypair and rotated the vault key.
+      const second = registerAgent(vaultRoot, "michi", "http://127.0.0.1:18870", { a2a_url: "http://192.168.1.79:18869" });
+      assert.equal(second.public_key, first.public_key, "key identity unchanged by URL change");
+      assert.ok(!fs.existsSync(path.join(tmp, ".mesh", "keys", "192.168.1.79.pem")), "no hostname-derived key minted");
+    });
+  });
+});

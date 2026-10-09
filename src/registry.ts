@@ -134,6 +134,30 @@ export function loadOrGenerateKeyPair(
   return result;
 }
 
+/**
+ * Load an EXISTING local keypair. Load-only: NEVER generates, and never
+ * consults the in-memory cache (a deleted or replaced key file must be
+ * observed as-is). Returns null when the key file does not exist; throws
+ * when it exists but cannot be read as a private key.
+ *
+ * Key-trap guard (2026-10-09, michi's catch at her Mac cutover; mirror of
+ * hermes-mesh f01ffd6): mesh registration must not mint a fresh keypair over
+ * an existing identity — that silently rotates the agent's key and breaks
+ * every peer holding the old one. Registration uses this helper to detect an
+ * existing keypair before deciding to refuse or bootstrap.
+ */
+export function loadExistingKeyPair(
+  name: string,
+  extra?: MeshBridgePluginConfig,
+): { privatePem: string; publicPem: string } | null {
+  const keyPath = getPrivateKeyPath(name, extra);
+  if (!fs.existsSync(keyPath)) return null;
+  const privatePem = fs.readFileSync(keyPath, "utf-8");
+  const publicKey = crypto.createPublicKey(privatePem);
+  const publicPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  return { privatePem, publicPem };
+}
+
 function privateKeyFor(name: string, extra?: MeshBridgePluginConfig): crypto.KeyObject {
   const { privatePem } = loadOrGenerateKeyPair(name, extra);
   return crypto.createPrivateKey(privatePem);
